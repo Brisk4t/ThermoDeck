@@ -1,19 +1,21 @@
-/* Host UI snapshots: renders the real src/main.c screens with faked Wi-Fi / Spotify
- * state and writes each one as a PPM, so layout changes can be checked without the device.
+/* Host UI snapshots: renders the real UI module (app/ui) with faked Wi-Fi / Spotify state
+ * and writes each screen as a PPM, so layout changes can be checked without the device.
  *
- *   make host && gcc -O1 -g -D_GNU_SOURCE -pthread -Isrc -Ithird_party/qrcodegen -o build-host/ui_host \
- *       tests/ui_host.c src/gfx.c src/util.c src/config.c gen/font_data.c third_party/qrcodegen/qrcodegen.c -lm
- *   ./build-host/ui_host <out dir>        -> <out dir>/<scenario>.ppm  (view with tools/ppm2png.py)
+ *   make tests && ./build-host/tests/ui_host <out dir>   -> <out dir>/<scenario>.ppm
+ *   (view with tools/ppm2png.py)
  */
-#define main thermodeck_main
-#include "../src/main.c"
-#undef main
+#include <pthread.h>
 
-/* ---- fakes for everything main.c talks to ---- */
+#include "core/common.h"
+#include "spotify/art.h"
+#include "spotify/spotify.h"
+#include "ui/internal.h"
+#include "web/web.h"
+#include "wifi/wifi.h"
+
+/* ---- fakes for everything the UI talks to ---- */
 static wifi_status fake_wifi;
 const wifi_status *wifi_get(void) { return &fake_wifi; }
-int wifi_init(void) { return 0; }
-void wifi_poll(void) {}
 void wifi_scan(void) {}
 void wifi_connect(const char *ssid, const char *psk, int secured) {}
 void wifi_forget(const char *ssid) {}
@@ -21,27 +23,20 @@ int wifi_is_saved(const char *ssid) { return 0; }
 int wifi_connect_saved(const char *ssid) { return -1; }
 
 sp_shared g_sp = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
-void spotify_start(void) {}
 void spotify_command(int cmd) {}
 void spotify_volume_step(int d) {}
 void spotify_toggle_play(void) {}
-void spotify_set_net(int up, const char *ip, const char *ssid, int signal) {}
 int spotify_progress_now(void) { return g_sp.progress_ms; }
 
 static uint32_t fake_art[ART_PX * ART_PX];
 static int have_art;
-void art_start(void) {}
 int art_draw(int x, int y, int r)
 {
     if (have_art) gfx_blit(x, y, ART_PX, ART_PX, fake_art, r);
     return have_art;
 }
 
-void web_start(int port) {}
 void web_get_pin(char out[7]) { strcpy(out, "123456"); }
-int touch_open(const char *dev, const touch_opts *o) { return -1; }
-int touch_read(touch_event *ev, int max) { return 0; }
-int touch_tick(touch_event *ev) { return 0; }
 
 /* ---- scenarios ---- */
 static const char *out_dir;
@@ -50,7 +45,7 @@ static void snap(const char *name)
 {
     char path[512];
     snprintf(path, sizeof path, "%s/%s.ppm", out_dir, name);
-    render();
+    ui_render();
     gfx_dump_ppm(path);
     printf("%s\n", path);
 }

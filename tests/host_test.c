@@ -1,9 +1,9 @@
-/* Host-side checks for the non-UI modules: make -C . test */
+/* Host-side checks for the json and net modules: make tests && ./build-host/tests/host_test */
 #include <assert.h>
 #include <stdlib.h>
-#include "common.h"
-#include "https.h"
-#include "json.h"
+#include "core/common.h"
+#include "json/json.h"
+#include "net/https.h"
 
 static const char *PLAYER =
     "{\"device\":{\"id\":\"x\",\"is_active\":true,\"name\":\"Kitchen \\u00e9 Speaker\",\"volume_percent\":42},"

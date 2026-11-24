@@ -1,9 +1,11 @@
-/* Host harness: runs the real web server + Spotify worker without the UI. */
+/* Host harness: runs the real web server + Spotify worker without the UI.
+ *   make tests && ./build-host/tests/web_host <dir with thermodeck.ini> */
 #include <unistd.h>
-#include "common.h"
-#include "config.h"
-#include "spotify.h"
-#include "web.h"
+#include "core/common.h"
+#include "core/config.h"
+#include "spotify/spotify.h"
+#include "ui/ui.h"
+#include "web/web.h"
 void ui_wake(void) {}
 int main(int argc, char **argv)
 {
