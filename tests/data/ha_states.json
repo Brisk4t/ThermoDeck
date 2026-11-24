@@ -1,22 +1,155 @@
 {
-  "light.living_room": {"s": "on", "a": {"friendly_name": "Living room", "brightness": 204}},
-  "light.floor_lamp": {"s": "off", "a": {"friendly_name": "Floor lamp light"}},
-  "light.kitchen": {"s": "on", "a": {"friendly_name": "Kitchen lights", "brightness": 255}},
-  "switch.tv_outlet": {"s": "on", "a": {"friendly_name": "TV outlet", "device_class": "outlet"}},
-  "switch.coffee_maker": {"s": "off", "a": {"friendly_name": "Coffee maker"}},
-  "fan.ceiling": {"s": "off", "a": {"friendly_name": "Ceiling fan"}},
-  "sensor.living_temperature": {"s": "21.4567", "a": {"friendly_name": "Living room temperature", "unit_of_measurement": "°C", "device_class": "temperature"}},
-  "sensor.living_humidity": {"s": "43", "a": {"friendly_name": "Living room humidity", "unit_of_measurement": "%", "device_class": "humidity"}},
-  "sensor.fridge_temperature": {"s": "3.9", "a": {"friendly_name": "Fridge", "unit_of_measurement": "°C", "device_class": "temperature"}},
-  "scene.movie_night": {"s": "2026-11-20T21:00:00+00:00", "a": {"friendly_name": "Movie night"}},
-  "scene.good_night": {"s": "unknown", "a": {"friendly_name": "Good night"}},
-  "script.feed_cat": {"s": "off", "a": {"friendly_name": "Feed the cat"}},
-  "binary_sensor.front_door": {"s": "off", "a": {"friendly_name": "Front door", "device_class": "door"}},
-  "binary_sensor.dishwasher_running": {"s": "on", "a": {"friendly_name": "Dishwasher", "device_class": "running"}},
-  "lock.front_door": {"s": "locked", "a": {"friendly_name": "Front door lock"}},
-  "cover.garage_door": {"s": "closed", "a": {"friendly_name": "Garage door", "device_class": "garage", "current_position": 0}},
-  "person.alex": {"s": "home", "a": {"friendly_name": "Alex"}},
-  "climate.hallway": {"s": "heat", "a": {"friendly_name": "Hallway thermostat", "current_temperature": 20.5, "temperature": 21}},
-  "media_player.kitchen_speaker": {"s": "playing", "a": {"friendly_name": "Kitchen speaker", "media_title": "WILDFIRE"}},
-  "camera.porch": {"s": "idle", "a": {"friendly_name": "Porch"}}
+  "light.living_room": {
+    "s": "on",
+    "a": {
+      "friendly_name": "Living room",
+      "brightness": 204
+    }
+  },
+  "light.floor_lamp": {
+    "s": "off",
+    "a": {
+      "friendly_name": "Floor lamp light"
+    }
+  },
+  "light.kitchen": {
+    "s": "on",
+    "a": {
+      "friendly_name": "Kitchen lights",
+      "brightness": 255
+    }
+  },
+  "switch.tv_outlet": {
+    "s": "on",
+    "a": {
+      "friendly_name": "TV outlet",
+      "device_class": "outlet"
+    }
+  },
+  "switch.coffee_maker": {
+    "s": "off",
+    "a": {
+      "friendly_name": "Coffee maker"
+    }
+  },
+  "fan.ceiling": {
+    "s": "off",
+    "a": {
+      "friendly_name": "Ceiling fan"
+    }
+  },
+  "sensor.living_temperature": {
+    "s": "21.4567",
+    "a": {
+      "friendly_name": "Living room temperature",
+      "unit_of_measurement": "\u00b0C",
+      "device_class": "temperature"
+    }
+  },
+  "sensor.living_humidity": {
+    "s": "43",
+    "a": {
+      "friendly_name": "Living room humidity",
+      "unit_of_measurement": "%",
+      "device_class": "humidity"
+    }
+  },
+  "sensor.fridge_temperature": {
+    "s": "3.9",
+    "a": {
+      "friendly_name": "Fridge",
+      "unit_of_measurement": "\u00b0C",
+      "device_class": "temperature"
+    }
+  },
+  "scene.movie_night": {
+    "s": "2026-11-20T21:00:00+00:00",
+    "a": {
+      "friendly_name": "Movie night"
+    }
+  },
+  "scene.good_night": {
+    "s": "unknown",
+    "a": {
+      "friendly_name": "Good night"
+    }
+  },
+  "script.feed_cat": {
+    "s": "off",
+    "a": {
+      "friendly_name": "Feed the cat"
+    }
+  },
+  "binary_sensor.front_door": {
+    "s": "off",
+    "a": {
+      "friendly_name": "Front door",
+      "device_class": "door"
+    }
+  },
+  "binary_sensor.dishwasher_running": {
+    "s": "on",
+    "a": {
+      "friendly_name": "Dishwasher",
+      "device_class": "running"
+    }
+  },
+  "lock.front_door": {
+    "s": "locked",
+    "a": {
+      "friendly_name": "Front door lock"
+    }
+  },
+  "cover.garage_door": {
+    "s": "closed",
+    "a": {
+      "friendly_name": "Garage door",
+      "device_class": "garage",
+      "current_position": 0
+    }
+  },
+  "person.alex": {
+    "s": "home",
+    "a": {
+      "friendly_name": "Alex"
+    }
+  },
+  "climate.hallway": {
+    "s": "heat",
+    "a": {
+      "friendly_name": "Hallway thermostat",
+      "current_temperature": 20.5,
+      "temperature": 21
+    }
+  },
+  "media_player.kitchen_speaker": {
+    "s": "playing",
+    "a": {
+      "friendly_name": "Kitchen speaker",
+      "media_title": "WILDFIRE"
+    }
+  },
+  "camera.porch": {
+    "s": "idle",
+    "a": {
+      "friendly_name": "Porch"
+    }
+  },
+  "weather.forecast_home": {
+    "s": "partlycloudy",
+    "a": {
+      "temperature": -1.8,
+      "dew_point": -7.3,
+      "temperature_unit": "\u00b0C",
+      "humidity": 68,
+      "cloud_coverage": 60.2,
+      "pressure": 1020.0,
+      "pressure_unit": "hPa",
+      "wind_bearing": 144.5,
+      "wind_speed": 15.5,
+      "wind_speed_unit": "km/h",
+      "friendly_name": "Forecast Home",
+      "supported_features": 3
+    }
+  }
 }

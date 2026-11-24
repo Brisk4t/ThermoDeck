@@ -51,7 +51,7 @@ endif
 OBJ := $(BUILD)/obj
 
 LIB_MODULES := core json net gfx input
-APP_MODULES := wifi spotify hass web ui
+APP_MODULES := wifi spotify hass cards web ui
 MODULE_DIRS := $(addprefix lib/,$(LIB_MODULES)) $(addprefix app/,$(APP_MODULES))
 
 # generated sources belong to the module that uses them
@@ -121,10 +121,10 @@ $(OBJ)/%.o: %.c
 
 TESTS := host_test web_host art_host ui_host hass_host
 TEST_LIBS_host_test := net json core bearssl
-TEST_LIBS_web_host := web spotify hass gfx net json core bearssl
+TEST_LIBS_web_host := web spotify hass cards gfx net json core bearssl
 TEST_LIBS_art_host := spotify gfx net json core bearssl
-TEST_LIBS_ui_host := ui hass gfx net json core qrcodegen bearssl
-TEST_LIBS_hass_host := hass net json core bearssl
+TEST_LIBS_ui_host := ui cards hass gfx net json core qrcodegen bearssl
+TEST_LIBS_hass_host := hass cards gfx net json core bearssl
 
 define test_rule
 $(BUILD)/tests/$(1): $(OBJ)/tests/$(1).o $(foreach m,$(TEST_LIBS_$(1)),$(call mod_lib,$(m)))

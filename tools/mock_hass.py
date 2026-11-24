@@ -2,8 +2,9 @@
 """Mock Home Assistant WebSocket API, for testing ThermoDeck without a real HA server.
 
 Implements what ThermoDeck uses: auth, lovelace/config, subscribe_events (lovelace_updated),
-subscribe_entities (with "a" / "c" state events), call_service (toggle / turn_on / turn_off
-change states and notify subscribers) and ping. Edit the dashboard file while it runs and
+subscribe_entities (with "a" / "c" state events), weather/subscribe_forecast (from
+tests/data/ha_forecasts.json), call_service (toggle / turn_on / turn_off change states and
+notify subscribers) and ping. Edit the dashboard file while it runs and
 connected clients get lovelace_updated, like editing a dashboard in HA.
 
   tools/mock_hass.py [--port 8123] [--token test-token] [--url-path dashboard-thermodeck]
@@ -30,6 +31,7 @@ ap.add_argument('--url-path', default='dashboard-thermodeck')
 here = os.path.dirname(os.path.abspath(__file__))
 ap.add_argument('--dashboard', default=os.path.join(here, '..', 'tests', 'data', 'ha_dashboard.json'))
 ap.add_argument('--states', default=os.path.join(here, '..', 'tests', 'data', 'ha_states.json'))
+ap.add_argument('--forecasts', default=os.path.join(here, '..', 'tests', 'data', 'ha_forecasts.json'))
 args = ap.parse_args()
 
 lock = threading.Lock()
@@ -141,6 +143,13 @@ class Client:
             with lock:
                 full = {e: states[e] for e in ids if e in states}
             self.send({'id': mid, 'type': 'event', 'event': {'a': full}})
+        elif t == 'weather/subscribe_forecast':
+            fc = json.load(open(args.forecasts)).get(m.get('entity_id'), {}).get(m.get('forecast_type'))
+            if fc is None:
+                self.result(mid, False, code='invalid_entity_id', message='Weather entity not found')
+            else:
+                self.result(mid, True, None)
+                self.send({'id': mid, 'type': 'event', 'event': {'type': m['forecast_type'], 'forecast': fc}})
         elif t == 'unsubscribe_events':
             self.ent_subs.pop(m.get('subscription'), None)
             self.lovelace_subs.discard(m.get('subscription'))

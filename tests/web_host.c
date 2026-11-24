@@ -7,6 +7,8 @@
 #include "ui/ui.h"
 #include "web/web.h"
 void ui_wake(void) {}
+int ui_screen_private(void) { return 0; }
+int ui_render_hass_page(int page, uint32_t *out, int timeout_ms) { return -1; }
 int main(int argc, char **argv)
 {
     str_copy(g_dir, sizeof g_dir, argv[1]);

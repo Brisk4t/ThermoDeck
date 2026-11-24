@@ -35,3 +35,5 @@ fridge stove microwave coffee-maker kettle dishwasher washing-machine tumble-dry
 desktop-classic laptop monitor printer gamepad-variant
 car ev-station dog cat baby-carriage flower leaf sprinkler pool pine-tree
 key cog tools trash-can package-variant
+# weather conditions (cards/weather.c)
+weather-lightning-rainy weather-snowy-rainy weather-windy-variant alert-circle-outline water-outline

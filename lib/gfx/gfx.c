@@ -144,11 +144,44 @@ static void put_row(int y, const uint32_t *src)
 
 static int visible_rows(void) { return fb_yres < SCR_H ? fb_yres : SCR_H; }
 
+static volatile uint32_t frames; /* bumped whenever the screen changes */
+
+uint32_t gfx_frame_count(void) { return frames; }
+
+int gfx_read_screen(uint32_t *out)
+{
+    if (!fb_mem) return -1;
+    memset(out, 0, sizeof(uint32_t) * SCR_W * SCR_H);
+    int w = fb_xres < SCR_W ? fb_xres : SCR_W;
+    for (int y = 0; y < visible_rows(); y++) {
+        const uint8_t *src = fb_mem + (size_t)y * (size_t)fb_line;
+        uint32_t *d = &out[y * SCR_W];
+        /* the reverse of put_row() */
+        if (native_xrgb) {
+            memcpy(d, src, (size_t)w * 4);
+            for (int x = 0; x < w; x++) d[x] &= 0xFFFFFF;
+        }
+        else if (fb_bpp == 32) {
+            const uint32_t *s = (const uint32_t *)src;
+            for (int x = 0; x < w; x++)
+                d[x] = (((s[x] >> r_off) & 255) << 16) | (((s[x] >> g_off) & 255) << 8) | ((s[x] >> b_off) & 255);
+        }
+        else if (fb_bpp == 16) {
+            const uint16_t *s = (const uint16_t *)src;
+            for (int x = 0; x < w; x++)
+                d[x] = ((uint32_t)((s[x] >> 11) & 31) << 19) | ((uint32_t)((s[x] >> 5) & 63) << 10) |
+                       ((uint32_t)(s[x] & 31) << 3);
+        }
+    }
+    return 0;
+}
+
 /* Copies the back buffer to the screen. */
 void gfx_flush(void)
 {
     if (!fb_mem) return;
     for (int y = 0; y < visible_rows(); y++) put_row(y, &backbuf[y * SCR_W]);
+    frames++;
 }
 
 uint32_t *gfx_buffer(void) { return backbuf; }
@@ -176,6 +209,7 @@ void gfx_present_slide(const uint32_t *a, const uint32_t *b, int top, int off, u
         }
         put_row(y, src);
     }
+    frames++;
 }
 
 /* Fills the whole back buffer. */

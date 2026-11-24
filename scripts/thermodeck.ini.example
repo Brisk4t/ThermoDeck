@@ -25,6 +25,10 @@ volume_step = 10
 ; URL of the dashboard to show, as in its address bar (Settings > Dashboards > Add
 ; dashboard named "ThermoDeck" gives dashboard-thermodeck). Build and edit it in HA;
 ; changes show up on the thermostat right away. Leave empty for the default dashboard.
+; Layout: in a sections view each section is one screen of 12 columns x 8 rows (HA's
+; grid rows; a heading takes about one of them); set the view to "max sections wide: 1" so HA's editor looks
+; similar. Live preview of the screen: http://<thermostat ip>:8080/preview (e.g. in a
+; Webpage card on another dashboard, next to the one you're editing).
 ;dashboard = dashboard-thermodeck
 ; Fallback if that dashboard doesn't exist: tiles for these entities.
 ;entities = light.living_room, switch.coffee_maker, sensor.outside_temperature

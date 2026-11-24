@@ -22,6 +22,48 @@ static const char *domain_of(const ha_entity *e, char *buf, size_t len)
 
 static int is(const char *a, const char *b) { return !strcmp(a, b); }
 
+/* HA's weather conditions with their English wording and icons (as in HA's frontend). */
+static const struct {
+    const char *cond, *label, *icon;
+} WEATHER[] = {
+    {"clear-night", "Clear, night", "weather-night"},
+    {"cloudy", "Cloudy", "weather-cloudy"},
+    {"exceptional", "Exceptional", "alert-circle-outline"},
+    {"fog", "Fog", "weather-fog"},
+    {"hail", "Hail", "weather-hail"},
+    {"lightning", "Lightning", "weather-lightning"},
+    {"lightning-rainy", "Lightning, rainy", "weather-lightning-rainy"},
+    {"partlycloudy", "Partly cloudy", "weather-partly-cloudy"},
+    {"pouring", "Pouring", "weather-pouring"},
+    {"rainy", "Rainy", "weather-rainy"},
+    {"snowy", "Snowy", "weather-snowy"},
+    {"snowy-rainy", "Snowy, rainy", "weather-snowy-rainy"},
+    {"sunny", "Sunny", "weather-sunny"},
+    {"windy", "Windy", "weather-windy"},
+    {"windy-variant", "Windy, cloudy", "weather-windy-variant"},
+};
+
+const char *ha_weather_label(const char *c)
+{
+    for (size_t i = 0; i < ARRAY_LEN(WEATHER); i++)
+        if (is(c, WEATHER[i].cond)) return WEATHER[i].label;
+    return c;
+}
+
+const char *ha_weather_icon(const char *c)
+{
+    for (size_t i = 0; i < ARRAY_LEN(WEATHER); i++)
+        if (is(c, WEATHER[i].cond)) return WEATHER[i].icon;
+    return "weather-partly-cloudy";
+}
+
+const char *ha_entity_attr(const ha_entity *e, const char *key)
+{
+    for (int i = 0; i < e->n_attrs; i++)
+        if (is(e->attrs[i].key, key)) return e->attrs[i].val[0] ? e->attrs[i].val : NULL;
+    return NULL;
+}
+
 int ha_entity_is_on(const ha_entity *e)
 {
     char d[32];
@@ -116,6 +158,10 @@ void ha_entity_state_text(const ha_entity *e, char *out, size_t len)
         str_copy(out, len, on ? "On" : "Off");
         return;
     }
+    if (is(dom, "weather")) {
+        str_copy(out, len, ha_weather_label(s));
+        return;
+    }
     /* scenes and buttons store when they last ran: say what they are instead */
     if (is(dom, "scene")) {
         str_copy(out, len, "Scene");
@@ -192,24 +238,7 @@ const char *ha_entity_icon(const ha_entity *e)
     if (is(dom, "media_player")) return is(dc, "tv") ? "television" : on ? "speaker" : "speaker-off";
     if (is(dom, "person") || is(dom, "device_tracker")) return on ? "account" : "account-arrow-right";
     if (is(dom, "sun")) return is(e->state, "below_horizon") ? "weather-night" : "white-balance-sunny";
-    if (is(dom, "weather")) {
-        static const struct {
-            const char *state, *icon;
-        } W[] = {{"sunny", "weather-sunny"},
-                 {"clear-night", "weather-night"},
-                 {"partlycloudy", "weather-partly-cloudy"},
-                 {"cloudy", "weather-cloudy"},
-                 {"rainy", "weather-rainy"},
-                 {"pouring", "weather-pouring"},
-                 {"snowy", "weather-snowy"},
-                 {"fog", "weather-fog"},
-                 {"windy", "weather-windy"},
-                 {"lightning", "weather-lightning"},
-                 {"hail", "weather-hail"}};
-        for (size_t i = 0; i < ARRAY_LEN(W); i++)
-            if (is(e->state, W[i].state)) return W[i].icon;
-        return "weather-partly-cloudy";
-    }
+    if (is(dom, "weather")) return ha_weather_icon(e->state);
     if (is(dom, "camera")) return "video";
     if (is(dom, "vacuum")) return "robot-vacuum";
     if (is(dom, "alarm_control_panel")) return on ? "shield-lock" : "shield-off";

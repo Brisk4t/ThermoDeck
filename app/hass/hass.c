@@ -13,9 +13,11 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "core/common.h"
+#include "cards/cards.h"
 #include "core/config.h"
 #include "json/json.h"
 #include "net/ws.h"
@@ -163,9 +165,10 @@ out:
 typedef struct {
     ws_conn *ws;
     int next_id;
-    int lovelace_sub; /* subscription id for lovelace_updated */
-    int config_req;   /* id of the pending lovelace/config request */
-    int ents_sub;     /* subscription id for entity states, 0 if none */
+    int lovelace_sub;              /* subscription id for lovelace_updated */
+    int config_req;                /* id of the pending lovelace/config request */
+    int ents_sub;                  /* subscription id for entity states, 0 if none */
+    int fc_subs[HA_MAX_FORECASTS]; /* forecast subscription ids (index = ha_dash.fcs), 0 if none */
     int call_ids[QLEN];
     int n_calls;
     uint64_t last_rx, last_ping;
@@ -207,15 +210,38 @@ static int request_config(session *s)
     return s->config_req;
 }
 
-/* (Re)subscribes to the states of the dashboard's entities. */
+static int unsubscribe(session *s, int *sub)
+{
+    if (*sub <= 0) return 0;
+    char body[96];
+    snprintf(body, sizeof body, "\"type\":\"unsubscribe_events\",\"subscription\":%d", *sub);
+    *sub = 0;
+    return send_msg(s, body) < 0 ? -1 : 0;
+}
+
+/* Subscribes to the forecasts the dashboard's cards asked for (ha_dash.fcs). */
+static int subscribe_forecasts(session *s)
+{
+    pthread_mutex_lock(&g_ha.mu);
+    int n = g_ha.d.n_fcs;
+    char bodies[HA_MAX_FORECASTS][160];
+    for (int i = 0; i < n; i++)
+        snprintf(bodies[i], sizeof bodies[i],
+                 "\"type\":\"weather/subscribe_forecast\",\"entity_id\":\"%s\",\"forecast_type\":\"%s\"",
+                 g_ha.d.ents[g_ha.d.fcs[i].ent].id, g_ha.d.fcs[i].type);
+    pthread_mutex_unlock(&g_ha.mu);
+    for (int i = 0; i < n; i++)
+        if ((s->fc_subs[i] = send_msg(s, bodies[i])) < 0) return -1;
+    return 0;
+}
+
+/* (Re)subscribes to the states of the dashboard's entities, and to its forecasts. */
 static int subscribe_entities(session *s)
 {
-    if (s->ents_sub > 0) {
-        char body[96];
-        snprintf(body, sizeof body, "\"type\":\"unsubscribe_events\",\"subscription\":%d", s->ents_sub);
-        if (send_msg(s, body) < 0) return -1;
-        s->ents_sub = 0;
-    }
+    if (unsubscribe(s, &s->ents_sub) < 0) return -1;
+    for (int i = 0; i < HA_MAX_FORECASTS; i++)
+        if (unsubscribe(s, &s->fc_subs[i]) < 0) return -1;
+    if (subscribe_forecasts(s) < 0) return -1;
     pthread_mutex_lock(&g_ha.mu);
     size_t cap = (size_t)g_ha.d.n_ents * 72 + 64, o = 0;
     char *body = malloc(cap);
@@ -235,14 +261,30 @@ static int subscribe_entities(session *s)
     return rc;
 }
 
-/* Installs a freshly parsed dashboard, keeping the states we already know. */
+/* Installs a freshly parsed dashboard, keeping the states (and forecasts) we already know. */
 static void install_dashboard(ha_dash *nd)
 {
     pthread_mutex_lock(&g_ha.mu);
     for (int i = 0; i < nd->n_ents; i++) {
         int old = find_entity(nd->ents[i].id);
-        if (old >= 0) nd->ents[i] = g_ha.d.ents[old];
+        if (old < 0) continue;
+        /* the old state, but the attribute list the new cards want (with values we already have) */
+        ha_entity fresh = nd->ents[i];
+        nd->ents[i] = g_ha.d.ents[old];
+        nd->ents[i].n_attrs = fresh.n_attrs;
+        for (int k = 0; k < fresh.n_attrs; k++) {
+            const char *v = ha_entity_attr(&g_ha.d.ents[old], fresh.attrs[k].key);
+            nd->ents[i].attrs[k] = fresh.attrs[k];
+            str_copy(nd->ents[i].attrs[k].val, sizeof fresh.attrs[k].val, v ? v : "");
+        }
     }
+    for (int i = 0; i < nd->n_fcs; i++)
+        for (int k = 0; k < g_ha.d.n_fcs; k++)
+            if (!strcmp(g_ha.d.ents[g_ha.d.fcs[k].ent].id, nd->ents[nd->fcs[i].ent].id) &&
+                !strcmp(g_ha.d.fcs[k].type, nd->fcs[i].type)) {
+                nd->fcs[i].n = g_ha.d.fcs[k].n;
+                memcpy(nd->fcs[i].e, g_ha.d.fcs[k].e, sizeof nd->fcs[i].e);
+            }
     g_ha.d = *nd;
     g_ha.status = HA_READY;
     g_ha.msg[0] = 0;
@@ -294,6 +336,16 @@ static int on_config(session *s, const json_doc *d, int msg)
     return rc < 0 ? -1 : 0;
 }
 
+/* A JSON value as text: strings unescaped, numbers / booleans as written, null as "". */
+static void literal(const json_doc *d, int val, char *out, size_t len)
+{
+    int n = d->t[val].end - d->t[val].start;
+    if (json_is_null(d, val) || d->t[val].type == J_OBJ || d->t[val].type == J_ARR)
+        out[0] = 0;
+    else if (json_str(d, val, out, len) != 0)
+        snprintf(out, len, "%.*s", n, d->js + d->t[val].start);
+}
+
 /* Reads the attributes we display from an attribute object (a full set or a diff). */
 static void apply_attrs(ha_entity *e, const json_doc *d, int a)
 {
@@ -305,6 +357,9 @@ static void apply_attrs(ha_entity *e, const json_doc *d, int a)
         char key[32];
         json_str(d, k, key, sizeof key);
         int null = json_is_null(d, val);
+        /* attributes some card asked to track */
+        for (int w = 0; w < e->n_attrs; w++)
+            if (is(key, e->attrs[w].key)) literal(d, val, e->attrs[w].val, sizeof e->attrs[w].val);
         if (is(key, "friendly_name"))
             json_str(d, val, e->name, sizeof e->name);
         else if (is(key, "unit_of_measurement"))
@@ -344,6 +399,8 @@ static void remove_attrs(ha_entity *e, const json_doc *d, int arr)
         if (is(key, "icon")) e->icon[0] = 0;
         if (is(key, "brightness")) e->brightness = -1;
         if (is(key, "media_title") || is(key, "current_temperature") || is(key, "current_position")) e->extra[0] = 0;
+        for (int w = 0; w < e->n_attrs; w++)
+            if (is(key, e->attrs[w].key)) e->attrs[w].val[0] = 0;
     }
 }
 
@@ -376,6 +433,7 @@ static void on_entities(const json_doc *d, int ev)
                     /* full state: attributes are complete, so reset them first */
                     e->unit[0] = e->icon[0] = e->device_class[0] = e->extra[0] = 0;
                     e->brightness = -1;
+                    for (int w = 0; w < e->n_attrs; w++) e->attrs[w].val[0] = 0;
                     set_state(e, d, json_get(d, val, "s"));
                     apply_attrs(e, d, json_get(d, val, "a"));
                 }
@@ -392,6 +450,51 @@ static void on_entities(const json_doc *d, int ev)
         }
     }
     g_ha.version++;
+    pthread_mutex_unlock(&g_ha.mu);
+    ui_wake();
+}
+
+/* "2026-11-24T18:00:00+00:00" (or ...Z, or with fractions) -> Unix time; 0 if unreadable. */
+static int64_t parse_iso_time(const char *s)
+{
+    struct tm tm = {0};
+    if (sscanf(s, "%d-%d-%dT%d:%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+        return 0;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    int64_t t = (int64_t)timegm(&tm);
+    /* UTC offset after the time, e.g. "+05:30" */
+    const char *z = s + 19;
+    while (*z == '.' || (*z >= '0' && *z <= '9')) z++;
+    int oh = 0, om = 0;
+    if ((*z == '+' || *z == '-') && sscanf(z + 1, "%d:%d", &oh, &om) >= 1)
+        t -= (*z == '+' ? 1 : -1) * (oh * 3600 + om * 60);
+    return t;
+}
+
+/* weather/subscribe_forecast event: {"type": "daily", "forecast": [{condition, datetime, temperature, templow}, ...]} */
+static void on_forecast(int idx, const json_doc *d, int ev)
+{
+    pthread_mutex_lock(&g_ha.mu);
+    if (idx < g_ha.d.n_fcs) {
+        ha_forecast *f = &g_ha.d.fcs[idx];
+        int arr = json_get(d, ev, "forecast");
+        f->n = 0;
+        for (int i = 0; i < HA_FORECAST_LEN; i++) {
+            int fe = json_at(d, arr, i);
+            if (fe < 0) break;
+            ha_forecast_entry *e = &f->e[f->n++];
+            char when[40] = "";
+            json_str(d, json_get(d, fe, "datetime"), when, sizeof when);
+            e->time = parse_iso_time(when);
+            e->condition[0] = e->temp[0] = e->templow[0] = 0;
+            json_str(d, json_get(d, fe, "condition"), e->condition, sizeof e->condition);
+            int t = json_get(d, fe, "temperature"), tl = json_get(d, fe, "templow");
+            if (t >= 0) literal(d, t, e->temp, sizeof e->temp);
+            if (tl >= 0) literal(d, tl, e->templow, sizeof e->templow);
+        }
+        g_ha.version++;
+    }
     pthread_mutex_unlock(&g_ha.mu);
     ui_wake();
 }
@@ -413,15 +516,18 @@ static int on_message(session *s, const char *js, size_t len)
         if (id == s->ents_sub) {
             on_entities(&d, ev);
         }
-        else if (id == s->lovelace_sub) {
-            /* someone edited a dashboard in HA: reload if it's ours */
-            char path[64] = "";
-            json_str(&d, json_path(&d, ev, "data.url_path"), path, sizeof path);
-            if (!strcmp(path, cfg_dashboard) || (!cfg_dashboard[0] && is(path, "lovelace"))) {
-                tdlog("hass: dashboard changed, reloading");
-                if (request_config(s) < 0) rc = -1;
+        for (int i = 0; i < HA_MAX_FORECASTS; i++)
+            if (id > 0 && id == s->fc_subs[i])
+                on_forecast(i, &d, ev);
+            else if (id == s->lovelace_sub) {
+                /* someone edited a dashboard in HA: reload if it's ours */
+                char path[64] = "";
+                json_str(&d, json_path(&d, ev, "data.url_path"), path, sizeof path);
+                if (!strcmp(path, cfg_dashboard) || (!cfg_dashboard[0] && is(path, "lovelace"))) {
+                    tdlog("hass: dashboard changed, reloading");
+                    if (request_config(s) < 0) rc = -1;
+                }
             }
-        }
     }
     else if (is(type, "result")) {
         int ok = json_bool(&d, json_get(&d, 0, "success"), 0);

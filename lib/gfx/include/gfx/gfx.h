@@ -19,6 +19,11 @@ uint32_t *gfx_buffer(void);
  * untouched). Rows above `top` come from a; below it, a's content is shifted down by off
  * pixels (up if negative) and b's content fills the gap (or `fill` if b is NULL). */
 void gfx_present_slide(const uint32_t *a, const uint32_t *b, int top, int off, uint32_t fill);
+/* What the panel shows right now (0xRRGGBB, SCR_W * SCR_H), read back from the framebuffer;
+ * safe to call from any thread. 0 on success. */
+int gfx_read_screen(uint32_t *out);
+/* Changes whenever something new is put on the screen (for cheap "has it changed?" checks). */
+uint32_t gfx_frame_count(void);
 
 void gfx_clear(uint32_t c);
 void gfx_fill(int x, int y, int w, int h, uint32_t c);

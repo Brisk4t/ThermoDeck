@@ -8,39 +8,229 @@
         {
           "type": "grid",
           "cards": [
-            {"type": "heading", "heading": "Living room"},
-            {"type": "tile", "entity": "light.living_room"},
-            {"type": "tile", "entity": "light.floor_lamp", "name": "Floor lamp"},
-            {"type": "tile", "entity": "switch.tv_outlet"},
-            {"type": "tile", "entity": "fan.ceiling"},
-            {"type": "sensor", "entity": "sensor.living_temperature", "name": "Temperature"},
-            {"type": "sensor", "entity": "sensor.living_humidity", "name": "Humidity"}
+            {
+              "type": "heading",
+              "heading": "Living room"
+            },
+            {
+              "type": "tile",
+              "entity": "light.living_room"
+            },
+            {
+              "type": "tile",
+              "entity": "light.floor_lamp",
+              "name": "Floor lamp"
+            },
+            {
+              "type": "tile",
+              "entity": "switch.tv_outlet"
+            },
+            {
+              "type": "tile",
+              "entity": "fan.ceiling"
+            },
+            {
+              "type": "sensor",
+              "entity": "sensor.living_temperature",
+              "name": "Temperature"
+            },
+            {
+              "type": "sensor",
+              "entity": "sensor.living_humidity",
+              "name": "Humidity"
+            }
           ]
         },
         {
           "type": "grid",
           "cards": [
-            {"type": "heading", "heading": "Scenes", "heading_style": "subtitle"},
-            {"type": "button", "entity": "scene.movie_night", "name": "Movie", "icon": "mdi:television"},
-            {"type": "button", "entity": "scene.good_night", "name": "Night", "icon": "mdi:weather-night"},
-            {"type": "button", "name": "All off", "icon": "mdi:power",
-             "tap_action": {"action": "perform-action", "perform_action": "light.turn_off",
-                            "target": {"entity_id": ["light.living_room", "light.floor_lamp", "light.kitchen"]}}},
-            {"type": "button", "entity": "script.feed_cat", "icon": "mdi:cat"}
+            {
+              "type": "heading",
+              "heading": "Weather"
+            },
+            {
+              "show_current": true,
+              "show_forecast": true,
+              "type": "weather-forecast",
+              "entity": "weather.forecast_home",
+              "forecast_type": "daily"
+            },
+            {
+              "type": "weather-forecast",
+              "entity": "weather.forecast_home",
+              "forecast_type": "hourly",
+              "show_current": false,
+              "name": "Next hours"
+            },
+            {
+              "type": "weather-forecast",
+              "entity": "weather.forecast_home",
+              "show_forecast": false,
+              "secondary_info_attribute": "humidity",
+              "grid_options": {
+                "columns": 6,
+                "rows": 2
+              }
+            },
+            {
+              "type": "tile",
+              "entity": "weather.forecast_home",
+              "grid_options": {
+                "columns": 6,
+                "rows": 2
+              }
+            }
           ]
         },
         {
           "type": "grid",
           "cards": [
-            {"type": "heading", "heading": "House"},
-            {"type": "entities", "title": "Doors", "entities": [
-              "binary_sensor.front_door",
-              {"entity": "lock.front_door", "name": "Front lock"},
-              {"entity": "cover.garage_door"},
-              "person.alex"
-            ]},
-            {"type": "tile", "entity": "climate.hallway", "grid_options": {"columns": 12}},
-            {"type": "picture-entity", "entity": "camera.porch"}
+            {
+              "type": "heading",
+              "heading": "Scenes",
+              "heading_style": "subtitle"
+            },
+            {
+              "type": "button",
+              "entity": "scene.movie_night",
+              "name": "Movie",
+              "icon": "mdi:television"
+            },
+            {
+              "type": "button",
+              "entity": "scene.good_night",
+              "name": "Night",
+              "icon": "mdi:weather-night"
+            },
+            {
+              "type": "button",
+              "name": "All off",
+              "icon": "mdi:power",
+              "tap_action": {
+                "action": "perform-action",
+                "perform_action": "light.turn_off",
+                "target": {
+                  "entity_id": [
+                    "light.living_room",
+                    "light.floor_lamp",
+                    "light.kitchen"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "button",
+              "entity": "script.feed_cat",
+              "icon": "mdi:cat"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "House"
+            },
+            {
+              "type": "entities",
+              "title": "Doors",
+              "entities": [
+                "binary_sensor.front_door",
+                {
+                  "entity": "lock.front_door",
+                  "name": "Front lock"
+                },
+                {
+                  "entity": "cover.garage_door"
+                },
+                "person.alex"
+              ]
+            },
+            {
+              "type": "tile",
+              "entity": "climate.hallway",
+              "grid_options": {
+                "columns": 12
+              }
+            },
+            {
+              "type": "picture-entity",
+              "entity": "camera.porch"
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "heading",
+              "heading": "Everything (too tall on purpose)"
+            },
+            {
+              "type": "tile",
+              "entity": "light.living_room"
+            },
+            {
+              "type": "tile",
+              "entity": "light.floor_lamp"
+            },
+            {
+              "type": "tile",
+              "entity": "switch.tv_outlet"
+            },
+            {
+              "type": "tile",
+              "entity": "fan.ceiling"
+            },
+            {
+              "type": "tile",
+              "entity": "light.kitchen"
+            },
+            {
+              "type": "tile",
+              "entity": "switch.coffee_maker"
+            },
+            {
+              "type": "tile",
+              "entity": "light.living_room"
+            },
+            {
+              "type": "tile",
+              "entity": "light.floor_lamp"
+            },
+            {
+              "type": "tile",
+              "entity": "switch.tv_outlet"
+            },
+            {
+              "type": "tile",
+              "entity": "fan.ceiling"
+            },
+            {
+              "type": "tile",
+              "entity": "light.kitchen"
+            },
+            {
+              "type": "tile",
+              "entity": "switch.coffee_maker"
+            },
+            {
+              "type": "tile",
+              "entity": "light.living_room"
+            },
+            {
+              "type": "tile",
+              "entity": "light.floor_lamp"
+            },
+            {
+              "type": "tile",
+              "entity": "switch.tv_outlet"
+            },
+            {
+              "type": "tile",
+              "entity": "fan.ceiling"
+            }
           ]
         }
       ]
@@ -48,13 +238,35 @@
     {
       "title": "Kitchen",
       "cards": [
-        {"type": "horizontal-stack", "cards": [
-          {"type": "button", "entity": "light.kitchen"},
-          {"type": "button", "entity": "switch.coffee_maker", "icon": "mdi:coffee-maker"},
-          {"type": "button", "entity": "media_player.kitchen_speaker"}
-        ]},
-        {"type": "markdown", "content": "## Note\nThe **dishwasher** finishes at *21:30*. Empty it before bed."},
-        {"type": "entities", "entities": ["sensor.fridge_temperature", "binary_sensor.dishwasher_running"]}
+        {
+          "type": "horizontal-stack",
+          "cards": [
+            {
+              "type": "button",
+              "entity": "light.kitchen"
+            },
+            {
+              "type": "button",
+              "entity": "switch.coffee_maker",
+              "icon": "mdi:coffee-maker"
+            },
+            {
+              "type": "button",
+              "entity": "media_player.kitchen_speaker"
+            }
+          ]
+        },
+        {
+          "type": "markdown",
+          "content": "## Note\nThe **dishwasher** finishes at *21:30*. Empty it before bed."
+        },
+        {
+          "type": "entities",
+          "entities": [
+            "sensor.fridge_temperature",
+            "binary_sensor.dishwasher_running"
+          ]
+        }
       ]
     }
   ]

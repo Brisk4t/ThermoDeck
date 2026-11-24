@@ -69,6 +69,24 @@ int main(int argc, char **argv)
     pthread_mutex_unlock(&g_ha.mu);
     assert(!strcmp(state_of("light.floor_lamp"), "off"));
 
+    /* the weather card's tracked attributes and forecast subscriptions */
+    for (int i = 0; i < 30 && !(g_ha.d.n_fcs && g_ha.d.fcs[0].n); i++) usleep(100000);
+    pthread_mutex_lock(&g_ha.mu);
+    for (int i = 0; i < g_ha.d.n_fcs; i++) {
+        const ha_forecast *fc = &g_ha.d.fcs[i];
+        printf("forecast %s %s: %d entries, first %s %s/%s at %lld\n", g_ha.d.ents[fc->ent].id, fc->type, fc->n,
+               fc->e[0].condition, fc->e[0].temp, fc->e[0].templow, (long long)fc->e[0].time);
+        assert(fc->n > 0 && fc->e[0].time > 1700000000);
+    }
+    for (int i = 0; i < g_ha.d.n_ents; i++)
+        if (!strcmp(g_ha.d.ents[i].id, "weather.forecast_home")) {
+            const char *t = ha_entity_attr(&g_ha.d.ents[i], "temperature");
+            printf("weather temperature attr: %s %s\n", t ? t : "(none)",
+                   ha_entity_attr(&g_ha.d.ents[i], "temperature_unit"));
+            assert(t && !strcmp(t, "-1.8"));
+        }
+    pthread_mutex_unlock(&g_ha.mu);
+
     /* tap the floor lamp tile: optimistic "on", then confirmed by the server */
     int item = find_item("light.floor_lamp");
     assert(item >= 0);

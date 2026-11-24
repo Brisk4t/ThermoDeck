@@ -8,6 +8,9 @@
 
 #include <stdlib.h>
 
+#include <time.h>
+
+#include "cards/cards.h"
 #include "core/common.h"
 #include "hass/hass.h"
 #include "json/json.h"
@@ -71,7 +74,39 @@ static void load_hass_fixture(void)
         int ct = json_get(&d, a, "current_temperature");
         if (ct >= 0)
             snprintf(e->extra, sizeof e->extra, "%.*s\xC2\xB0", d.t[ct].end - d.t[ct].start, js + d.t[ct].start);
+        /* attributes the cards asked to track (card_want_attr) */
+        for (int k = 0; k < e->n_attrs; k++) {
+            int v = json_get(&d, a, e->attrs[k].key);
+            if (v >= 0 && json_str(&d, v, e->attrs[k].val, sizeof e->attrs[k].val) != 0)
+                snprintf(e->attrs[k].val, sizeof e->attrs[k].val, "%.*s", d.t[v].end - d.t[v].start, js + d.t[v].start);
+        }
         e->has_state = 1;
+    }
+    free(js);
+
+    /* forecasts the cards subscribed to (tests/data/ha_forecasts.json) */
+    js = file_read("tests/data/ha_forecasts.json", &len);
+    json_parse(&d, js, len, t, 4096);
+    for (int i = 0; i < g_ha.d.n_fcs; i++) {
+        ha_forecast *f = &g_ha.d.fcs[i];
+        int arr = json_get(&d, json_get(&d, 0, g_ha.d.ents[f->ent].id), f->type);
+        for (f->n = 0; f->n < HA_FORECAST_LEN && json_at(&d, arr, f->n) >= 0; f->n++) {
+            int fe = json_at(&d, arr, f->n);
+            ha_forecast_entry *x = &f->e[f->n];
+            char when[40];
+            struct tm tm = {0};
+            json_str(&d, json_get(&d, fe, "datetime"), when, sizeof when);
+            sscanf(when, "%d-%d-%dT%d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min);
+            tm.tm_year -= 1900;
+            tm.tm_mon -= 1;
+            x->time = timegm(&tm);
+            json_str(&d, json_get(&d, fe, "condition"), x->condition, sizeof x->condition);
+            int tv = json_get(&d, fe, "temperature"), tl = json_get(&d, fe, "templow");
+            snprintf(x->temp, sizeof x->temp, "%.*s", tv >= 0 ? d.t[tv].end - d.t[tv].start : 0,
+                     js + (tv >= 0 ? d.t[tv].start : 0));
+            snprintf(x->templow, sizeof x->templow, "%.*s", tl >= 0 ? d.t[tl].end - d.t[tl].start : 0,
+                     js + (tl >= 0 ? d.t[tl].start : 0));
+        }
     }
     free(js);
     g_ha.status = HA_READY;

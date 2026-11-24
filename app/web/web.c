@@ -10,6 +10,9 @@
  * GET  /callback  ?code=&state= (needs session; localhost: auth.sh)
  * POST /code      url=<redirected address> (needs session)
  * GET  /logout    forget the Spotify token (localhost only: auth.sh logout)
+ * GET  /preview   the HA pages as drawn on the thermostat, or the live screen (embeddable,
+ *                 e.g. in HA's Webpage card)
+ * GET  /screen.ver, /screen.bmp [?page=N]   change check / image for /preview
  */
 #include "web/web.h"
 
@@ -26,6 +29,7 @@
 #include <unistd.h>
 
 #include "core/common.h"
+#include "gfx/gfx.h"
 #include "hass/hass.h"
 #include "spotify/spotify.h"
 #include "ui/ui.h"
@@ -132,8 +136,10 @@ static void send_all(int fd, const char *buf, size_t len)
     }
 }
 
-/* Sends a complete response with security headers and Connection: close. */
-static void respond(int fd, int status, const char *ctype, const char *extra_hdr, const char *body)
+/* Sends a complete response with security headers and Connection: close. Only pages
+ * meant to be embedded elsewhere (the screen preview) may be framed. */
+static void respond_raw(int fd, int status, const char *ctype, const char *extra_hdr, const char *body, size_t len,
+                        int frameable)
 {
     char head[768];
     const char *st = status == 200   ? "OK"
@@ -143,10 +149,111 @@ static void respond(int fd, int status, const char *ctype, const char *extra_hdr
                                      : "Bad Request";
     int n = snprintf(head, sizeof head,
                      "HTTP/1.0 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\n"
-                     "X-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n%sConnection: close\r\n\r\n",
-                     status, st, ctype, strlen(body), extra_hdr ? extra_hdr : "");
+                     "%sReferrer-Policy: no-referrer\r\n%sConnection: close\r\n\r\n",
+                     status, st, ctype, len, frameable ? "" : "X-Frame-Options: DENY\r\n", extra_hdr ? extra_hdr : "");
     send_all(fd, head, (size_t)n);
-    send_all(fd, body, strlen(body));
+    send_all(fd, body, len);
+}
+
+static void respond(int fd, int status, const char *ctype, const char *extra_hdr, const char *body)
+{
+    respond_raw(fd, status, ctype, extra_hdr, body, strlen(body), 0);
+}
+
+/* ---------- screen preview ---------- */
+
+/*
+ * Preview page: shows the Home Assistant pages as the thermostat draws them (rendered
+ * off-screen, whatever the thermostat is showing), or the live screen. It polls
+ * /screen.ver and reloads the image only when something changed.
+ */
+static const char PREVIEW_HTML[] =
+    "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>ThermoDeck preview</title><style>html,body{margin:0;height:100%;background:#000;color:#bbb;"
+    "font:14px sans-serif}body{display:flex;flex-direction:column;align-items:center}"
+    "#bar{display:flex;gap:8px;align-items:center;padding:6px}button{background:#2c2c2c;color:#eee;border:0;"
+    "border-radius:6px;padding:4px 12px;font-size:14px;cursor:pointer}button.on{background:#1DB954;color:#000}"
+    "#v{flex:1;min-height:0;display:flex;justify-content:center;width:100%}"
+    "img{height:100%;max-height:960px;max-width:100%;aspect-ratio:2/3;object-fit:contain}"
+    "#m{display:none;padding:20px;text-align:center}</style></head><body><div id=bar>"
+    "<button id=pv>&#9650;</button><span id=pl></span><button id=nx>&#9660;</button>"
+    "<button id=lv>Live screen</button></div><div id=v><img id=s alt=''>"
+    "<div id=m>Hidden while the screen shows a PIN or password.</div></div><script>"
+    "let $=x=>document.getElementById(x),live=0,p=0,n=1,v='';"
+    "function q(){return live?'':'?page='+p}"
+    "function ui(){$('pl').textContent=live?'what the thermostat shows':'Home Assistant page '+(p+1)+' / '+n;"
+    "$('pv').style.visibility=$('nx').style.visibility=live?'hidden':'';$('lv').className=live?'on':''}"
+    "$('pv').onclick=()=>{if(p>0){p--;v='';t()}};$('nx').onclick=()=>{if(p<n-1){p++;v='';t()}};"
+    "$('lv').onclick=()=>{live=!live;v='';t()};"
+    "let tm;async function t(){clearTimeout(tm);try{let r=(await(await fetch('/screen.ver'+q(),{cache:'no-store'}))"
+    ".text()).split(' ');if(r[0]==='private'){$('s').style.display='none';$('m').style.display='block'}"
+    "else{$('m').style.display='none';$('s').style.display='';if(!live){n=+r[1]||1;if(p>=n)p=n-1}"
+    "if(r[0]!==v){v=r[0];$('s').src='/screen.bmp'+(live?'?':q()+'&')+'v='+v}}}catch(e){}ui();tm=setTimeout(t,800)}"
+    "t()</script></body></html>";
+
+static int preview_pages = 1; /* HA page count as of the last preview render */
+
+/* page >= 0: that Home Assistant page rendered off-screen; page < 0: the live screen.
+ * Sent as a 24-bit BMP (no compression needed on the LAN). */
+static void send_screen_bmp(int fd, int page)
+{
+    static uint32_t px[SCR_W * SCR_H];
+    const size_t row = SCR_W * 3, size = 54 + row * SCR_H;
+    uint8_t *bmp = malloc(size);
+    int ok;
+    if (page >= 0) {
+        int n = ui_render_hass_page(page, px, 3000);
+        if (n > 0) preview_pages = n;
+        ok = n > 0;
+    }
+    else {
+        /* the live screen may show a PIN or password: check before and after reading it */
+        ok = !ui_screen_private() && gfx_read_screen(px) == 0 && !ui_screen_private();
+    }
+    if (!bmp || !ok) {
+        free(bmp);
+        respond(fd, 403, "text/plain", NULL, "screen not available right now");
+        return;
+    }
+    /* BITMAPFILEHEADER + BITMAPINFOHEADER, then bottom-up BGR rows */
+    memset(bmp, 0, 54);
+    uint32_t hdr[] = {(uint32_t)size,          0,    54,   40, SCR_W, SCR_H, 1 | (24 << 16), 0,
+                      (uint32_t)(row * SCR_H), 2835, 2835, 0,  0};
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    memcpy(bmp + 2, hdr, sizeof hdr); /* little-endian, like the BMP format */
+    for (int y = 0; y < SCR_H; y++) {
+        uint8_t *d = bmp + 54 + (size_t)(SCR_H - 1 - y) * row;
+        for (int x = 0; x < SCR_W; x++) {
+            uint32_t c = px[y * SCR_W + x];
+            d[x * 3] = (uint8_t)c;
+            d[x * 3 + 1] = (uint8_t)(c >> 8);
+            d[x * 3 + 2] = (uint8_t)(c >> 16);
+        }
+    }
+    respond_raw(fd, 200, "image/bmp", NULL, (const char *)bmp, size, 1);
+    free(bmp);
+}
+
+/* "<version> <pages>": the version changes whenever the image would. */
+static void send_screen_ver(int fd, int page)
+{
+    char v[64];
+    if (page >= 0) {
+        /* HA page: dashboard / state changes, and the minute (the clock is in the header) */
+        pthread_mutex_lock(&g_ha.mu);
+        uint32_t hv = g_ha.version, lv = g_ha.layout_ver;
+        pthread_mutex_unlock(&g_ha.mu);
+        snprintf(v, sizeof v, "%u.%u.%ld.%d %d", (unsigned)hv, (unsigned)lv, (long)(time(NULL) / 60), page,
+                 preview_pages);
+    }
+    else if (ui_screen_private()) {
+        str_copy(v, sizeof v, "private");
+    }
+    else {
+        snprintf(v, sizeof v, "live%u 1", (unsigned)gfx_frame_count());
+    }
+    respond_raw(fd, 200, "text/plain", NULL, v, strlen(v), 1);
 }
 
 /* 303 redirect (used after a POST so a refresh doesn't resubmit it). */
@@ -556,6 +663,18 @@ static void handle(int fd, int local)
                       rc == 0 ? "Authorization received - check the thermostat screen."
                               : "Couldn't find a valid code in that address (or it was from an older login link).");
         }
+    }
+    else if (!strcmp(method, "GET") && !strcmp(target, "/preview")) {
+        respond_raw(fd, 200, "text/html; charset=utf-8", NULL, PREVIEW_HTML, sizeof PREVIEW_HTML - 1, 1);
+    }
+    else if (!strcmp(method, "GET") && (!strcmp(target, "/screen.ver") || !strcmp(target, "/screen.bmp"))) {
+        /* ?page=N: Home Assistant page N; no page: the live screen */
+        char pg[8] = "";
+        int page = qs && query_param(qs, "page", pg, sizeof pg) == 0 ? atoi(pg) : -1;
+        if (!strcmp(target, "/screen.ver"))
+            send_screen_ver(fd, page);
+        else
+            send_screen_bmp(fd, page);
     }
     else if (!strcmp(method, "GET") && !strcmp(target, "/logout")) {
         if (!local) {

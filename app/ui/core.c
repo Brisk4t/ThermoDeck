@@ -6,6 +6,7 @@
 #include "ui/ui.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -31,6 +32,80 @@ void ui_wake(void)
 }
 
 int ui_wake_fd(void) { return wake_pipe[0]; }
+
+/* ---------- off-screen renders for the web preview ---------- */
+
+static pthread_mutex_t prev_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t prev_cv = PTHREAD_COND_INITIALIZER;
+static uint32_t *prev_out; /* request pending while set; cleared by the requester */
+static int prev_page, prev_done, prev_pages;
+
+int ui_render_hass_page(int page, uint32_t *out, int timeout_ms)
+{
+    pthread_mutex_lock(&prev_mu);
+    while (prev_out) pthread_cond_wait(&prev_cv, &prev_mu); /* one request at a time */
+    prev_out = out;
+    prev_page = page;
+    prev_done = 0;
+    pthread_mutex_unlock(&prev_mu);
+    ui_wake();
+
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += timeout_ms / 1000;
+    until.tv_nsec += (long)(timeout_ms % 1000) * 1000000;
+    if (until.tv_nsec >= 1000000000) {
+        until.tv_sec++;
+        until.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&prev_mu);
+    while (!prev_done && pthread_cond_timedwait(&prev_cv, &prev_mu, &until) == 0) {}
+    int rc = prev_done ? prev_pages : -1;
+    prev_out = NULL;
+    pthread_cond_broadcast(&prev_cv);
+    pthread_mutex_unlock(&prev_mu);
+    return rc;
+}
+
+/* UI thread: draws a requested HA page into the requester's buffer, then redraws the
+ * current screen into the back buffer (nothing is flushed, so the display doesn't change). */
+static void serve_preview(void)
+{
+    pthread_mutex_lock(&prev_mu);
+    uint32_t *out = prev_done ? NULL : prev_out;
+    int page = prev_page;
+    pthread_mutex_unlock(&prev_mu);
+    if (!out || pager_busy()) return;
+
+    int screen = ui.screen, ha_page = ui.ha_page, home = ui.home, dirty = ui.dirty, pressed = ui.pressed_id;
+    ui.screen = SCR_HASS;
+    ui.ha_page = page;
+    ui.pressed_id = 0;
+    ui_draw();
+    int pages = hass_page_count();
+    pthread_mutex_lock(&prev_mu);
+    if (prev_out == out) {
+        memcpy(out, gfx_buffer(), sizeof(uint32_t) * SCR_W * SCR_H);
+        prev_pages = pages;
+        prev_done = 1;
+        pthread_cond_broadcast(&prev_cv);
+    }
+    pthread_mutex_unlock(&prev_mu);
+    ui.screen = screen;
+    ui.ha_page = ha_page;
+    ui.home = home;
+    ui.pressed_id = pressed;
+    ui_draw(); /* back buffer and hits belong to the real screen again */
+    ui.dirty = dirty;
+}
+
+int ui_screen_private(void)
+{
+    pthread_mutex_lock(&g_sp.mu);
+    int login = g_sp.auth == SP_NEED_AUTH || g_sp.auth == SP_AUTHORIZING; /* PIN on the Spotify page */
+    pthread_mutex_unlock(&g_sp.mu);
+    return ui.screen == SCR_KEYBOARD || login;
+}
 
 /* Short message shown at the bottom of the current screen for a few seconds. */
 void ui_toast(const char *msg)
@@ -198,6 +273,7 @@ void ui_update(void)
 {
     char junk[64];
     while (read(wake_pipe[0], junk, sizeof junk) > 0) {}
+    serve_preview();
 
     /* Spotify */
     pthread_mutex_lock(&g_sp.mu);
