@@ -21,7 +21,7 @@
 #define STBI_NO_LINEAR
 #define STBI_NO_HDR
 #define STBI_MAX_DIMENSIONS 4096
-#include "../third_party/stb/stb_image.h"
+#include "stb_image.h"
 #pragma GCC diagnostic pop
 
 #define CACHE_N 6

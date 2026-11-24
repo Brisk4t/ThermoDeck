@@ -1,5 +1,7 @@
 build/
 build-host/
+build-tools/
+gen/
+third_party/
 *.ini
 !scripts/*.ini.example
-third_party/
