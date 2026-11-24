@@ -56,24 +56,48 @@ void gfx_close(void)
     if (fb_fd >= 0) close(fb_fd);
 }
 
+static int read_int_file(const char *path, int def)
+{
+    FILE *f = fopen(path, "r");
+    int v = def;
+    if (f) {
+        if (fscanf(f, "%d", &v) != 1) v = def;
+        fclose(f);
+    }
+    return v;
+}
+
+static int write_int_file(const char *path, int v)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    fprintf(f, "%d\n", v);
+    return fclose(f);
+}
+
+/* The ecobee's panel backlight is the PWM LED "led-pwm0" (0..255); mxs-bl exists but
+ * doesn't drive it, so it's just parked at full. Percent is perceptual: PWM duty
+ * follows a gamma-2 curve so equal slider steps look like equal brightness steps. */
 void gfx_set_backlight(int percent)
 {
-    FILE *f = fopen("/sys/class/backlight/mxs-bl/max_brightness", "r");
-    int max = 100;
-    if (f) {
-        if (fscanf(f, "%d", &max) != 1) max = 100;
-        fclose(f);
+    percent = CLAMP(percent, 1, 100);
+    const char *led = "/sys/class/leds/led-pwm0";
+    char path[96];
+    snprintf(path, sizeof path, "%s/max_brightness", led);
+    int max = read_int_file(path, -1);
+    if (max > 0) {
+        float f = (float)percent / 100.0f;
+        int duty = 1 + (int)((float)(max - 1) * f * f + 0.5f);
+        snprintf(path, sizeof path, "%s/brightness", led);
+        write_int_file(path, duty);
     }
-    f = fopen("/sys/class/backlight/mxs-bl/brightness", "w");
-    if (f) {
-        fprintf(f, "%d\n", CLAMP(percent, 1, 100) * max / 100);
-        fclose(f);
-    }
-    f = fopen("/sys/class/backlight/mxs-bl/bl_power", "w");
-    if (f) {
-        fputs("0\n", f);
-        fclose(f);
-    }
+    const char *bl = "/sys/class/backlight/mxs-bl";
+    snprintf(path, sizeof path, "%s/max_brightness", bl);
+    int blmax = read_int_file(path, 100);
+    snprintf(path, sizeof path, "%s/brightness", bl);
+    write_int_file(path, max > 0 ? blmax : percent * blmax / 100);
+    snprintf(path, sizeof path, "%s/bl_power", bl);
+    write_int_file(path, 0);
 }
 
 void gfx_flush(void)

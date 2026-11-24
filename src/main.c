@@ -39,13 +39,17 @@
 #define C_YELLOW 0xE0B341
 
 /* ---------- UI state ---------- */
-enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER, SCR_TZ };
+enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER, SCR_TZ, SCR_BRIGHT };
 
 enum {
     BTN_NONE = 0,
     BTN_HEADER_WIFI,
     BTN_HEADER_CLOCK,
     BTN_TZ_24H,
+    BTN_HEADER_BRIGHT,
+    BTN_BRIGHT_SLIDER,
+    BTN_BRIGHT_DOWN,
+    BTN_BRIGHT_UP,
     BTN_LIST_UP,
     BTN_LIST_DOWN,
     BTN_RESCAN,
@@ -111,6 +115,8 @@ static struct {
     /* clock settings (clock.conf overrides thermodeck.ini) */
     char tz[64];
     int clock_24h;
+    int brightness; /* backlight percent */
+    int drag_id;    /* control being dragged (slider), 0 if none */
 } ui;
 
 static int wake_pipe[2] = {-1, -1};
@@ -209,6 +215,20 @@ static void draw_lock(int x, int y, uint32_t c, uint32_t bg)
     (void)bg;
 }
 
+/* Sun: disc of radius r with 8 rays. */
+static void draw_sun(int cx, int cy, int r, uint32_t c, uint32_t bg)
+{
+    (void)bg;
+    gfx_circle(cx, cy, r, c);
+    float fx = (float)cx + 0.5f, fy = (float)cy + 0.5f;
+    float r0 = (float)r + 2.5f, r1 = (float)r + 2.5f + (float)r * 0.8f;
+    for (int i = 0; i < 8; i++) {
+        float a = (float)i * 0.785398f;
+        float ca = cosf(a), sa = sinf(a);
+        draw_line(fx + ca * r0, fy + sa * r0, fx + ca * r1, fy + sa * r1, r >= 8 ? 2.4f : 1.8f, c);
+    }
+}
+
 static void draw_header(const char *title)
 {
     gfx_fill(0, 0, SCR_W, 44, C_HEADER);
@@ -250,6 +270,14 @@ static void draw_header(const char *title)
     }
     int right = bx - 8;
     int left_limit = 14 + gfx_text_width(&font_mdb, title) + 16;
+    int clock_right = left_limit - 8;
+    if (ui.screen == SCR_PLAYER) {
+        /* brightness shortcut next to the clock */
+        int sx = left_limit + 10;
+        draw_sun(sx, 22, 5, is_pressed(BTN_HEADER_BRIGHT) ? C_TEXT : C_SUB, C_HEADER);
+        add_hit(BTN_HEADER_BRIGHT, clock_right, 0, 36, 45);
+        left_limit = clock_right + 36 + 8;
+    }
     int maxw = right - left_limit;
     if (label[0] && maxw > 30) {
         int tw = gfx_text_width(&font_sm, label);
@@ -257,7 +285,7 @@ static void draw_header(const char *title)
         else gfx_text(&font_sm, right - tw, 27, label, label_c);
     }
     add_hit(BTN_HEADER_WIFI, left_limit - 8, 0, SCR_W - left_limit + 8, 45);
-    if (ui.screen == SCR_PLAYER) add_hit(BTN_HEADER_CLOCK, 0, 0, left_limit - 8, 45);
+    if (ui.screen == SCR_PLAYER) add_hit(BTN_HEADER_CLOCK, 0, 0, clock_right, 45);
 }
 
 static void draw_toast(int y)
@@ -322,30 +350,51 @@ static void clock_apply(void)
     tzset();
 }
 
-static void clock_load(void)
+#define BRIGHT_MIN 5
+
+static void brightness_apply(int pct)
+{
+    static int applied = -1;
+    pct = CLAMP(pct, BRIGHT_MIN, 100);
+    if (pct != applied) {
+        gfx_set_backlight(pct);
+        applied = pct;
+    }
+}
+
+/* User settings changed on the device live in settings.conf and override thermodeck.ini.
+ * (Older builds wrote clock.conf; it's read once if settings.conf doesn't exist yet.) */
+static void settings_load(void)
 {
     str_copy(ui.tz, sizeof ui.tz, config_get("display", "timezone", "UTC0"));
     ui.clock_24h = config_int("display", "clock_24h", 0);
+    ui.brightness = config_int("display", "brightness", 80);
     char p[300];
-    path_join(p, sizeof p, "clock.conf");
+    path_join(p, sizeof p, "settings.conf");
     char *d = file_read(p, NULL);
+    if (!d) {
+        path_join(p, sizeof p, "clock.conf");
+        d = file_read(p, NULL);
+    }
     if (d) {
         for (char *line = strtok(d, "\n"); line; line = strtok(NULL, "\n")) {
             if (!strncmp(line, "tz=", 3)) str_copy(ui.tz, sizeof ui.tz, line + 3);
             else if (!strncmp(line, "clock_24h=", 10)) ui.clock_24h = atoi(line + 10);
+            else if (!strncmp(line, "brightness=", 11)) ui.brightness = atoi(line + 11);
         }
         free(d);
     }
+    ui.brightness = CLAMP(ui.brightness, BRIGHT_MIN, 100);
     clock_apply();
-    tdlog("clock: TZ=%s, %d-hour", ui.tz, ui.clock_24h ? 24 : 12);
+    tdlog("settings: TZ=%s, %d-hour, brightness %d%%", ui.tz, ui.clock_24h ? 24 : 12, ui.brightness);
 }
 
-static void clock_save(void)
+static void settings_save(void)
 {
-    char p[300], buf[128];
-    path_join(p, sizeof p, "clock.conf");
-    int n = snprintf(buf, sizeof buf, "tz=%s\nclock_24h=%d\n", ui.tz, ui.clock_24h);
-    if (file_write_atomic(p, buf, (size_t)n, 0644) < 0) tdlog("clock: could not save %s", p);
+    char p[300], buf[160];
+    path_join(p, sizeof p, "settings.conf");
+    int n = snprintf(buf, sizeof buf, "tz=%s\nclock_24h=%d\nbrightness=%d\n", ui.tz, ui.clock_24h, ui.brightness);
+    if (file_write_atomic(p, buf, (size_t)n, 0644) < 0) tdlog("settings: could not save %s", p);
 }
 
 /* "6:45 AM" / "06:45" for time t in the current TZ. */
@@ -428,6 +477,56 @@ static void render_tz(void)
     int can_down = ui.list_off + LIST_ROWS < n;
     button(BTN_LIST_DOWN, 242, by, 72, bh, NULL, &font_md, can_down ? BS_NORMAL : BS_DISABLED);
     gfx_tri(278 - 10, by + 24, 278 + 10, by + 24, 278, by + 38, can_down ? C_TEXT : C_DIM);
+}
+
+/* ---------- brightness ---------- */
+
+#define SL_X0 50
+#define SL_X1 (SCR_W - 50)
+#define SL_Y 250
+
+static void brightness_set(int pct)
+{
+    pct = CLAMP(pct, BRIGHT_MIN, 100);
+    if (pct == ui.brightness) return;
+    ui.brightness = pct;
+    brightness_apply(pct);
+    ui.dirty = 1;
+}
+
+static void slider_touch(int x)
+{
+    int pct = BRIGHT_MIN + (x - SL_X0) * (100 - BRIGHT_MIN) / (SL_X1 - SL_X0);
+    brightness_set(pct);
+}
+
+static void render_bright(void)
+{
+    draw_header("Brightness");
+
+    char v[8];
+    snprintf(v, sizeof v, "%d%%", ui.brightness);
+    draw_sun(SCR_W / 2, 118, 12, C_TEXT, C_BG);
+    gfx_text_center(&font_xl, SCR_W / 2, 196, v, C_TEXT);
+
+    /* slider: track, fill, knob */
+    int kx = SL_X0 + (ui.brightness - BRIGHT_MIN) * (SL_X1 - SL_X0) / (100 - BRIGHT_MIN);
+    gfx_rrect(SL_X0, SL_Y - 4, SL_X1 - SL_X0, 8, 4, 0x3E3E3E);
+    gfx_rrect(SL_X0, SL_Y - 4, kx - SL_X0 + 4, 8, 4, C_GREEN);
+    gfx_circle(kx, SL_Y, ui.drag_id == BTN_BRIGHT_SLIDER ? 16 : 13, C_TEXT);
+    draw_sun(SL_X0 - 26, SL_Y, 3, C_DIM, C_BG);
+    draw_sun(SL_X1 + 26, SL_Y, 5, C_SUB, C_BG);
+    add_hit(BTN_BRIGHT_SLIDER, 0, SL_Y - 34, SCR_W, 68);
+
+    /* fine steps */
+    button(BTN_BRIGHT_DOWN, 20, 306, 134, 64, NULL, &font_md, ui.brightness > BRIGHT_MIN ? BS_NORMAL : BS_DISABLED);
+    gfx_rrect(20 + 67 - 9, 306 + 31, 18, 3, 1, ui.brightness > BRIGHT_MIN ? C_TEXT : C_DIM);
+    button(BTN_BRIGHT_UP, 166, 306, 134, 64, NULL, &font_md, ui.brightness < 100 ? BS_NORMAL : BS_DISABLED);
+    uint32_t pc = ui.brightness < 100 ? C_TEXT : C_DIM;
+    gfx_rrect(166 + 67 - 9, 306 + 31, 18, 3, 1, pc);
+    gfx_rrect(166 + 67 - 1, 306 + 23, 3, 18, 1, pc);
+
+    button(BTN_DONE, 20, 412, SCR_W - 40, 60, "Done", &font_mdb, BS_PRIMARY);
 }
 
 static void render_wifi(void)
@@ -827,6 +926,7 @@ static void render(void)
     case SCR_WIFI: render_wifi(); break;
     case SCR_KEYBOARD: render_keyboard(); break;
     case SCR_TZ: render_tz(); break;
+    case SCR_BRIGHT: render_bright(); break;
     default: render_player(); break;
     }
     gfx_flush();
@@ -881,7 +981,7 @@ static void on_press(int id)
         if (idx < N_ZONES && strcmp(ui.tz, ZONES[idx].tz)) {
             str_copy(ui.tz, sizeof ui.tz, ZONES[idx].tz);
             clock_apply();
-            clock_save();
+            settings_save();
             tdlog("clock: time zone set to %s (%s)", ZONES[idx].name, ui.tz);
         }
         return;
@@ -915,9 +1015,12 @@ static void on_press(int id)
         }
         break;
     case BTN_HEADER_CLOCK: open_tz(); break;
+    case BTN_HEADER_BRIGHT: ui.screen = SCR_BRIGHT; break;
+    case BTN_BRIGHT_DOWN: brightness_set(ui.brightness <= 10 ? BRIGHT_MIN : (ui.brightness - 1) / 10 * 10); settings_save(); break;
+    case BTN_BRIGHT_UP: brightness_set((ui.brightness / 10 + 1) * 10); settings_save(); break;
     case BTN_TZ_24H:
         ui.clock_24h = !ui.clock_24h;
-        clock_save();
+        settings_save();
         break;
     case BTN_LIST_UP: ui.list_off -= LIST_ROWS; break;
     case BTN_LIST_DOWN: ui.list_off += LIST_ROWS; break;
@@ -965,6 +1068,13 @@ static void handle_touch(const touch_event *e)
 {
     if (e->type == TOUCH_UP) {
         ui.last_up_ms = now_ms();
+        if (ui.drag_id == BTN_BRIGHT_SLIDER) settings_save();
+        if (ui.drag_id) ui.dirty = 1;
+        ui.drag_id = 0;
+        return;
+    }
+    if (e->type == TOUCH_MOVE) {
+        if (ui.drag_id == BTN_BRIGHT_SLIDER && ui.screen == SCR_BRIGHT) slider_touch(e->x);
         return;
     }
     if (e->type != TOUCH_DOWN) return;
@@ -972,6 +1082,13 @@ static void handle_touch(const touch_event *e)
     for (int i = ui.n_hits - 1; i >= 0; i--) {
         const hit *h = &ui.hits[i];
         if (e->x >= h->x && e->x < h->x + h->w && e->y >= h->y && e->y < h->y + h->h) {
+            if (h->id == BTN_BRIGHT_SLIDER) {
+                /* sliders track the finger instead of firing once */
+                ui.drag_id = h->id;
+                slider_touch(e->x);
+                ui.dirty = 1;
+                return;
+            }
             ui.pressed_id = h->id;
             ui.pressed_until = now_ms() + 160;
             on_press(h->id);
@@ -998,10 +1115,10 @@ int main(int argc, char **argv)
     char cfg[300];
     path_join(cfg, sizeof cfg, "thermodeck.ini");
     if (config_load(cfg) < 0) tdlog("config: %s not found, using defaults", cfg);
-    clock_load();
+    settings_load();
 
     if (gfx_init("/dev/fb0") < 0) return 1;
-    gfx_set_backlight(config_int("display", "brightness", 80));
+    brightness_apply(ui.brightness);
     splash("Starting...");
 
     touch_opts topt = {

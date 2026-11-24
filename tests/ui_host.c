@@ -108,5 +108,10 @@ int main(int argc, char **argv)
     ui.screen = SCR_PLAYER;                                 snap("player_mountain");
     open_tz();                                              snap("tz_screen");
     ui.clock_24h = 1; ui.list_off = 20;                     snap("tz_screen_24h_end");
+    ui.clock_24h = 0;
+    ui.screen = SCR_PLAYER;                                 snap("player_sun");
+    ui.brightness = 65; ui.screen = SCR_BRIGHT;             snap("bright_65");
+    ui.brightness = 5; ui.drag_id = BTN_BRIGHT_SLIDER;      snap("bright_min_drag");
+    ui.drag_id = 0;
     return 0;
 }
