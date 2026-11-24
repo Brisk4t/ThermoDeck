@@ -1,0 +1,33 @@
+# ThermoDeck C style. Run `make format` (needs clang-format: `pip install clang-format`).
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+IndentCaseLabels: false
+PointerAlignment: Right
+
+# Function braces on their own line, control-statement braces on the same line, and
+# `else` always starts a new line after the closing brace (never `} else {`).
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterStruct: false
+  AfterUnion: false
+  BeforeElse: true
+  BeforeWhile: false
+  SplitEmptyFunction: false
+
+# Keep short guard clauses and tiny helpers compact, but never put an if/else pair on one line.
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortEnumsOnASingleLine: true
+
+AlignTrailingComments: true
+AlignConsecutiveMacros: Consecutive
+SpaceAfterCStyleCast: false
+SortIncludes: Never
+ReflowComments: false

@@ -70,7 +70,8 @@ int main(int argc, char **argv)
     out_dir = argc > 1 ? argv[1] : ".";
     for (int y = 0; y < ART_PX; y++)
         for (int x = 0; x < ART_PX; x++)
-            fake_art[y * ART_PX + x] = ((uint32_t)(40 + x) << 16) | ((uint32_t)(60 + y / 2) << 8) | (uint32_t)(120 + (x + y) / 3);
+            fake_art[y * ART_PX + x] =
+                ((uint32_t)(40 + x) << 16) | ((uint32_t)(60 + y / 2) << 8) | (uint32_t)(120 + (x + y) / 3);
     have_art = 1;
 
     /* a playing track */
@@ -91,27 +92,45 @@ int main(int argc, char **argv)
     ui.screen = SCR_PLAYER;
     ui.web_port = 8080;
 
-    wifi_set(WS_CONNECTED, "Poverty", -50, 0);              snap("hdr_connected_strong");
-    wifi_set(WS_CONNECTED, "Poverty", -78, 0);              snap("hdr_connected_weak");
-    wifi_set(WS_CONNECTED, "A Very Long Network Name 5G", -60, 0); snap("hdr_long_ssid");
-    g_sp.last_poll_ok = 0;
-    wifi_set(WS_CONNECTED, "Poverty", -50, 0);              snap("hdr_no_internet");
-    g_sp.last_poll_ok = 1;
-    wifi_set(WS_CONNECTING, "Poverty", 0, 0);               snap("hdr_connecting");
-    wifi_set(WS_FAILED, "Poverty", 0, 1);                   snap("hdr_wrong_password");
-    wifi_set(WS_FAILED, "Poverty", 0, 0);                   snap("hdr_offline");
-    wifi_set(WS_IDLE, "", 0, 0);                            snap("hdr_idle");
     wifi_set(WS_CONNECTED, "Poverty", -50, 0);
-    ui.screen = SCR_WIFI;                                   snap("wifi_screen");
+    snap("hdr_connected_strong");
+    wifi_set(WS_CONNECTED, "Poverty", -78, 0);
+    snap("hdr_connected_weak");
+    wifi_set(WS_CONNECTED, "A Very Long Network Name 5G", -60, 0);
+    snap("hdr_long_ssid");
+    g_sp.last_poll_ok = 0;
+    wifi_set(WS_CONNECTED, "Poverty", -50, 0);
+    snap("hdr_no_internet");
+    g_sp.last_poll_ok = 1;
+    wifi_set(WS_CONNECTING, "Poverty", 0, 0);
+    snap("hdr_connecting");
+    wifi_set(WS_FAILED, "Poverty", 0, 1);
+    snap("hdr_wrong_password");
+    wifi_set(WS_FAILED, "Poverty", 0, 0);
+    snap("hdr_offline");
+    wifi_set(WS_IDLE, "", 0, 0);
+    snap("hdr_idle");
+    wifi_set(WS_CONNECTED, "Poverty", -50, 0);
+    ui.screen = SCR_WIFI;
+    snap("wifi_screen");
     str_copy(ui.tz, sizeof ui.tz, "MST7MDT,M3.2.0,M11.1.0");
     clock_apply();
-    ui.screen = SCR_PLAYER;                                 snap("player_mountain");
-    open_tz();                                              snap("tz_screen");
-    ui.clock_24h = 1; ui.list_off = 20;                     snap("tz_screen_24h_end");
+    ui.screen = SCR_PLAYER;
+    snap("player_mountain");
+    open_tz();
+    snap("tz_screen");
+    ui.clock_24h = 1;
+    ui.list_off = 20;
+    snap("tz_screen_24h_end");
     ui.clock_24h = 0;
-    ui.screen = SCR_PLAYER;                                 snap("player_sun");
-    ui.brightness = 65; ui.screen = SCR_BRIGHT;             snap("bright_65");
-    ui.brightness = 5; ui.drag_id = BTN_BRIGHT_SLIDER;      snap("bright_min_drag");
+    ui.screen = SCR_PLAYER;
+    snap("player_sun");
+    ui.brightness = 65;
+    ui.screen = SCR_BRIGHT;
+    snap("bright_65");
+    ui.brightness = 5;
+    ui.drag_id = BTN_BRIGHT_SLIDER;
+    snap("bright_min_drag");
     ui.drag_id = 0;
     return 0;
 }

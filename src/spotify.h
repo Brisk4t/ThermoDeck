@@ -20,9 +20,9 @@ typedef struct {
     uint32_t version; /* bumped on any change visible to the UI */
 
     /* inputs from the UI / web threads */
-    int net_up;           /* Wi-Fi connected with an IP */
+    int net_up; /* Wi-Fi connected with an IP */
     char ip[16];
-    char wifi_ssid[33];   /* for the web status page */
+    char wifi_ssid[33]; /* for the web status page */
     int wifi_signal;
     int cmds;             /* CMD_* bitmask */
     int volume_target;    /* for CMD_VOLUME */
@@ -31,20 +31,20 @@ typedef struct {
 
     /* outputs */
     sp_auth_state auth;
-    char auth_msg[128];   /* last auth error / hint */
+    char auth_msg[128]; /* last auth error / hint */
     int time_synced;
 
     int has_item;
     char title[256], artist[256], album[256], device[64];
     int is_playing;
     int duration_ms, progress_ms;
-    uint64_t sync_ms;     /* now_ms() at which progress_ms was valid */
-    int volume;           /* -1 unknown */
-    int supports_volume;  /* device allows remote volume (Web API supports_volume) */
+    uint64_t sync_ms;           /* now_ms() at which progress_ms was valid */
+    int volume;                 /* -1 unknown */
+    int supports_volume;        /* device allows remote volume (Web API supports_volume) */
     uint64_t play_hold_until;   /* don't let polls override an optimistic play/pause */
     uint64_t volume_hold_until; /* don't let polls override an optimistic volume */
     int last_poll_ok;
-    char toast[96];       /* transient message (e.g. "Premium required") */
+    char toast[96]; /* transient message (e.g. "Premium required") */
     uint64_t toast_until;
 } sp_shared;
 

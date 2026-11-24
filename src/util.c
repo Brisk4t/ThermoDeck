@@ -1,3 +1,8 @@
+/*
+ * Small shared helpers: logging, time, strings, files, URL/base64/hex encoding, randomness
+ * and a one-shot SNTP client.
+ */
+
 #include "common.h"
 
 #include <arpa/inet.h>
@@ -16,10 +21,12 @@
 #ifndef BUILD_EPOCH
 #define BUILD_EPOCH 1764000000L
 #endif
+/* Build time (seconds since 1970): a lower bound for "the clock has been set". */
 const long g_build_epoch = BUILD_EPOCH;
 
 char g_dir[256] = "/config/thermodeck";
 
+/* Monotonic milliseconds; unaffected by NTP changing the wall clock. */
 uint64_t now_ms(void)
 {
     struct timespec ts;
@@ -27,12 +34,14 @@ uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
+/* Timestamped log line to stderr (boot.sh sends it to /tmp/thermodeck.log). */
 void tdlog(const char *fmt, ...)
 {
     char buf[1024];
     va_list ap;
     uint64_t t = now_ms();
-    int n = snprintf(buf, sizeof buf, "[%5llu.%03llu] ", (unsigned long long)(t / 1000), (unsigned long long)(t % 1000));
+    int n =
+        snprintf(buf, sizeof buf, "[%5llu.%03llu] ", (unsigned long long)(t / 1000), (unsigned long long)(t % 1000));
     va_start(ap, fmt);
     vsnprintf(buf + n, sizeof buf - (size_t)n - 2, fmt, ap);
     va_end(ap);
@@ -45,6 +54,7 @@ void tdlog(const char *fmt, ...)
     fflush(stderr);
 }
 
+/* strlcpy: always NUL-terminates, truncates if needed, NULL src gives "". */
 void str_copy(char *dst, size_t dstlen, const char *src)
 {
     if (!dstlen) return;
@@ -54,11 +64,10 @@ void str_copy(char *dst, size_t dstlen, const char *src)
     dst[n] = 0;
 }
 
-void path_join(char *out, size_t outlen, const char *name)
-{
-    snprintf(out, outlen, "%s/%s", g_dir, name);
-}
+/* Path of a file in the data directory (g_dir). */
+void path_join(char *out, size_t outlen, const char *name) { snprintf(out, outlen, "%s/%s", g_dir, name); }
 
+/* Reads a whole file into a malloc'd, NUL-terminated buffer. */
 char *file_read(const char *path, size_t *len)
 {
     int fd = open(path, O_RDONLY);
@@ -69,7 +78,11 @@ char *file_read(const char *path, size_t *len)
         if (n == cap) {
             cap *= 2;
             char *nb = realloc(buf, cap + 1);
-            if (!nb) { free(buf); close(fd); return NULL; }
+            if (!nb) {
+                free(buf);
+                close(fd);
+                return NULL;
+            }
             buf = nb;
         }
         ssize_t r = read(fd, buf + n, cap - n);
@@ -83,6 +96,10 @@ char *file_read(const char *path, size_t *len)
     return buf;
 }
 
+/*
+ * Writes to path.tmp, fsyncs, then renames over path, so a power cut never leaves a
+ * half-written file.
+ */
 int file_write_atomic(const char *path, const void *data, size_t len, int mode)
 {
     char tmp[300];
@@ -93,16 +110,24 @@ int file_write_atomic(const char *path, const void *data, size_t len, int mode)
     while (len) {
         ssize_t w = write(fd, p, len);
         if (w < 0 && errno == EINTR) continue;
-        if (w <= 0) { close(fd); unlink(tmp); return -1; }
+        if (w <= 0) {
+            close(fd);
+            unlink(tmp);
+            return -1;
+        }
         p += w;
         len -= (size_t)w;
     }
     fsync(fd);
     close(fd);
-    if (rename(tmp, path) < 0) { unlink(tmp); return -1; }
+    if (rename(tmp, path) < 0) {
+        unlink(tmp);
+        return -1;
+    }
     return 0;
 }
 
+/* Standard base64 with padding (for HTTP Basic auth). */
 size_t base64_encode(const unsigned char *in, size_t len, char *out, size_t outlen)
 {
     static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -121,15 +146,18 @@ size_t base64_encode(const unsigned char *in, size_t len, char *out, size_t outl
     return o;
 }
 
+/* Percent-encodes everything except RFC 3986 unreserved characters. */
 void url_encode(const char *in, char *out, size_t outlen)
 {
     static const char hx[] = "0123456789ABCDEF";
     size_t o = 0;
     for (; *in && o + 4 < outlen; in++) {
         unsigned char c = (unsigned char)*in;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+            c == '.' || c == '~') {
             out[o++] = (char)c;
-        } else {
+        }
+        else {
             out[o++] = '%';
             out[o++] = hx[c >> 4];
             out[o++] = hx[c & 15];
@@ -138,6 +166,7 @@ void url_encode(const char *in, char *out, size_t outlen)
     out[o] = 0;
 }
 
+/* Hex digit value, or -1. */
 static int hexval(int c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -146,22 +175,29 @@ static int hexval(int c)
     return -1;
 }
 
+/* Decodes %XX and '+' (form encoding). */
 void url_decode(const char *in, size_t inlen, char *out, size_t outlen)
 {
     size_t o = 0;
     for (size_t i = 0; i < inlen && o + 1 < outlen; i++) {
         if (in[i] == '+') {
             out[o++] = ' ';
-        } else if (in[i] == '%' && i + 2 < inlen && hexval(in[i + 1]) >= 0 && hexval(in[i + 2]) >= 0) {
+        }
+        else if (in[i] == '%' && i + 2 < inlen && hexval(in[i + 1]) >= 0 && hexval(in[i + 2]) >= 0) {
             out[o++] = (char)(hexval(in[i + 1]) * 16 + hexval(in[i + 2]));
             i += 2;
-        } else {
+        }
+        else {
             out[o++] = in[i];
         }
     }
     out[o] = 0;
 }
 
+/*
+ * Finds name=value in a query string (or a full URL) and URL-decodes the value.
+ * Returns -1 if the parameter isn't there.
+ */
 int query_param(const char *qs, const char *name, char *out, size_t outlen)
 {
     size_t nl = strlen(name);
@@ -179,6 +215,7 @@ int query_param(const char *qs, const char *name, char *out, size_t outlen)
     return -1;
 }
 
+/* Lowercase hex; out needs 2*len+1 bytes. */
 void hex_encode(const unsigned char *in, size_t len, char *out)
 {
     static const char hx[] = "0123456789abcdef";
@@ -189,6 +226,7 @@ void hex_encode(const unsigned char *in, size_t len, char *out)
     out[len * 2] = 0;
 }
 
+/* Hex string -> bytes. Returns the byte count, or -1 on a bad digit / overflow. */
 int hex_decode(const char *in, unsigned char *out, size_t outlen)
 {
     size_t n = 0;
@@ -201,6 +239,7 @@ int hex_decode(const char *in, unsigned char *out, size_t outlen)
     return (int)n;
 }
 
+/* Fills buf from /dev/urandom (weak fallback only if that fails). */
 void random_bytes(unsigned char *buf, size_t len)
 {
     int fd = open("/dev/urandom", O_RDONLY);
@@ -216,6 +255,10 @@ void random_bytes(unsigned char *buf, size_t len)
     for (; got < len; got++) buf[got] = (unsigned char)(rand() ^ (int)now_ms());
 }
 
+/*
+ * Asks an NTP server for the time (up to 3 tries) and sets the system clock.
+ * Returns 0 on success. Answers older than the build date are ignored.
+ */
 int sntp_sync(const char *server)
 {
     struct addrinfo hints = {0}, *ai = NULL;
@@ -236,8 +279,11 @@ int sntp_sync(const char *server)
             if (poll(&pfd, 1, 2500) <= 0) continue;
             unsigned char resp[48];
             if (recv(fd, resp, sizeof resp, 0) < 48) continue;
-            uint32_t secs = ((uint32_t)resp[40] << 24) | ((uint32_t)resp[41] << 16) | ((uint32_t)resp[42] << 8) | resp[43];
-            uint32_t frac = ((uint32_t)resp[44] << 24) | ((uint32_t)resp[45] << 16) | ((uint32_t)resp[46] << 8) | resp[47];
+            /* transmit timestamp: seconds + fraction since 1900 */
+            uint32_t secs =
+                ((uint32_t)resp[40] << 24) | ((uint32_t)resp[41] << 16) | ((uint32_t)resp[42] << 8) | resp[43];
+            uint32_t frac =
+                ((uint32_t)resp[44] << 24) | ((uint32_t)resp[45] << 16) | ((uint32_t)resp[46] << 8) | resp[47];
             if (secs == 0) continue;
             struct timeval tv;
             tv.tv_sec = (time_t)(secs - 2208988800u);
@@ -246,7 +292,8 @@ int sntp_sync(const char *server)
             if (settimeofday(&tv, NULL) == 0) {
                 rc = 0;
                 tdlog("ntp: clock set from %s", server);
-            } else {
+            }
+            else {
                 tdlog("ntp: settimeofday failed: %s", strerror(errno));
                 rc = -2;
             }

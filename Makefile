@@ -2,6 +2,8 @@
 #
 #   make                 build build/thermodeck
 #   make host            build a host binary (build-host/thermodeck) for compile checks
+#   make format          reformat the C sources with clang-format (.clang-format)
+#   make format-check    list files that aren't formatted (exit 1 if any)
 #   make clean           delete build outputs (incl. generated sources in gen/)
 #   make distclean       also delete the downloaded third_party/ inputs
 #
@@ -26,8 +28,8 @@ BEARSSL := third_party/bearssl
 QRCODE := third_party/qrcodegen
 STB := third_party/stb
 
-# Fetch third_party/ before anything below globs it (skipped for clean targets).
-ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
+# Fetch third_party/ before anything below globs it (skipped for clean / format targets).
+ifeq ($(filter clean distclean format format-check,$(MAKECMDGOALS)),)
 ifneq ($(shell sh tools/fetch_deps.sh >&2 && echo ok),ok)
 $(error could not fetch third_party sources (see tools/fetch_deps.sh))
 endif
@@ -98,10 +100,23 @@ $(GEN)/font_data.c: $(TOOLS)/gen_font third_party/dejavu/DejaVuSans.ttf third_pa
 host:
 	$(MAKE) BUILD=build-host CROSS= ARCHFLAGS= TOOLCHAIN=
 
+# ---- formatting (clang-format: `pip install clang-format`) ----
+
+CLANG_FORMAT ?= clang-format
+FORMAT_SRC := $(wildcard src/*.c src/*.h tests/*.c tools/*.c)
+
+format:
+	$(CLANG_FORMAT) -i $(FORMAT_SRC)
+
+format-check:
+	@bad=0; for f in $(FORMAT_SRC); do \
+	  $(CLANG_FORMAT) $$f | cmp -s - $$f || { echo "needs formatting: $$f"; bad=1; }; \
+	done; exit $$bad
+
 clean:
 	rm -rf build build-host $(TOOLS) $(GEN)
 
 distclean: clean
 	rm -rf third_party
 
-.PHONY: all host clean distclean
+.PHONY: all host format format-check clean distclean

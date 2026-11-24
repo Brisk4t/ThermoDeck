@@ -1,3 +1,11 @@
+/*
+ * Wi-Fi via wpa_supplicant's control socket (the same protocol wpa_cli uses). All calls
+ * happen on the UI thread: wifi_poll() is called from the main loop and turns
+ * wpa_supplicant's STATUS into a simple connection state for the UI. Networks are only
+ * saved to wifi.conf once a connection has actually worked, and only the derived key is
+ * stored, never the passphrase.
+ */
+
 #include "wifi.h"
 
 #include <arpa/inet.h>
@@ -19,12 +27,14 @@
 #include "config.h"
 
 #define WPA_CTRL_DIR "/var/run/wpa_supplicant"
-#define MAX_SAVED 8
+#define MAX_SAVED    8
 
+/* control socket, current status as shown by the UI */
 static int ctrl_fd = -1;
 static char local_path[64];
 static wifi_status st;
 
+/* saved networks, most recently used first */
 static struct {
     char ssid[33];
     char psk[65];
@@ -32,9 +42,15 @@ static struct {
 } saved[MAX_SAVED];
 static int n_saved;
 
+/* connection state machine timers / bookkeeping */
 static uint64_t next_status_ms, next_scan_results_ms, connect_started_ms, dhcp_started_ms, next_auto_scan_ms;
 static int dhcp_started;
-static struct { int active; char ssid[33]; char psk[65]; int secured; } pending; /* saved once connected */
+static struct {
+    int active;
+    char ssid[33];
+    char psk[65];
+    int secured;
+} pending; /* saved once connected */
 static int scan_results_tries;
 static int last_was_completed;
 /* Wrong-key detection: the 4-way handshake starting and then falling back to scanning. */
@@ -43,6 +59,7 @@ static int handshake_fails;
 
 /* ---------- wpa_supplicant control interface ---------- */
 
+/* Binds a local datagram socket and connects it to wpa_supplicant's socket for wlan0. */
 static int ctrl_open(void)
 {
     if (ctrl_fd >= 0) return 0;
@@ -110,6 +127,7 @@ static int wpa_req(const char *cmd, char *reply, size_t len)
     }
 }
 
+/* Sends a formatted command; 0 if wpa_supplicant answered "OK". */
 static int wpa_ok(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static int wpa_ok(const char *fmt, ...)
 {
@@ -122,7 +140,8 @@ static int wpa_ok(const char *fmt, ...)
     if (r < 0) return -1;
     if (strncmp(reply, "OK", 2) != 0) {
         /* don't log the psk */
-        tdlog("wifi: '%.*s' -> %s", (int)(strstr(cmd, " psk ") ? strstr(cmd, " psk ") - cmd : (long)strlen(cmd)), cmd, reply);
+        tdlog("wifi: '%.*s' -> %s", (int)(strstr(cmd, " psk ") ? strstr(cmd, " psk ") - cmd : (long)strlen(cmd)), cmd,
+              reply);
         return -1;
     }
     return 0;
@@ -130,6 +149,7 @@ static int wpa_ok(const char *fmt, ...)
 
 /* ---------- saved networks: g_dir/wifi.conf, one per line: <ssid hex> <secured> <psk hex|-> ---------- */
 
+/* Reads wifi.conf into saved[]. */
 static void saved_load(void)
 {
     char path[300];
@@ -160,6 +180,7 @@ static void saved_load(void)
     tdlog("wifi: %d saved network(s)", n_saved);
 }
 
+/* Writes saved[] back to wifi.conf (mode 0600: it holds keys). */
 static void saved_store(void)
 {
     char path[300], buf[MAX_SAVED * 240];
@@ -167,14 +188,17 @@ static void saved_store(void)
     for (int i = 0; i < n_saved; i++) {
         char sh[70], ph[140];
         hex_encode((const unsigned char *)saved[i].ssid, strlen(saved[i].ssid), sh);
-        if (saved[i].psk[0]) hex_encode((const unsigned char *)saved[i].psk, strlen(saved[i].psk), ph);
-        else strcpy(ph, "-");
+        if (saved[i].psk[0])
+            hex_encode((const unsigned char *)saved[i].psk, strlen(saved[i].psk), ph);
+        else
+            strcpy(ph, "-");
         o += (size_t)snprintf(buf + o, sizeof buf - o, "%s %d %s\n", sh, saved[i].secured, ph);
     }
     path_join(path, sizeof path, "wifi.conf");
     if (file_write_atomic(path, buf, o, 0600) < 0) tdlog("wifi: failed to save %s", path);
 }
 
+/* Adds or updates a network and moves it to the front of the list. */
 static void saved_put_first(const char *ssid, const char *psk, int secured)
 {
     int i;
@@ -191,6 +215,7 @@ static void saved_put_first(const char *ssid, const char *psk, int secured)
     saved_store();
 }
 
+/* Whether credentials for ssid are saved. */
 int wifi_is_saved(const char *ssid)
 {
     for (int i = 0; i < n_saved; i++)
@@ -200,8 +225,10 @@ int wifi_is_saved(const char *ssid)
 
 /* ---------- helpers ---------- */
 
+/* Marks the status as changed so the UI repaints. */
 static void bump(void) { st.version++; }
 
+/* IPv4 address currently assigned to wlan0 ("" if none). */
 static void get_ip(char *out, size_t len)
 {
     out[0] = 0;
@@ -224,19 +251,36 @@ static void ssid_decode(const char *in, char *out, size_t outlen)
         if (*in == '\\' && in[1]) {
             in++;
             switch (*in) {
-            case 'n': out[o++] = '\n'; in++; break;
-            case 'r': out[o++] = '\r'; in++; break;
-            case 't': out[o++] = '\t'; in++; break;
-            case 'e': out[o++] = 27; in++; break;
+            case 'n':
+                out[o++] = '\n';
+                in++;
+                break;
+            case 'r':
+                out[o++] = '\r';
+                in++;
+                break;
+            case 't':
+                out[o++] = '\t';
+                in++;
+                break;
+            case 'e':
+                out[o++] = 27;
+                in++;
+                break;
             case 'x': {
                 unsigned v = 0;
-                if (sscanf(in + 1, "%2x", &v) == 1) { out[o++] = (char)v; in += 3; }
-                else in++;
+                if (sscanf(in + 1, "%2x", &v) == 1) {
+                    out[o++] = (char)v;
+                    in += 3;
+                }
+                else
+                    in++;
                 break;
             }
             default: out[o++] = *in++; break;
             }
-        } else {
+        }
+        else {
             out[o++] = *in++;
         }
     }
@@ -251,6 +295,7 @@ static void wpa_psk_hex(const char *pass, const char *ssid, char out[65])
     br_hmac_key_init(&kc, &br_sha1_vtable, pass, strlen(pass));
     unsigned char key[40];
     size_t sl = strlen(ssid);
+    /* two 20-byte PBKDF2 blocks -> the first 32 bytes are the key */
     for (int blk = 1; blk <= 2; blk++) {
         unsigned char u[20], t[20];
         br_hmac_context hc;
@@ -271,6 +316,7 @@ static void wpa_psk_hex(const char *pass, const char *ssid, char out[65])
     hex_encode(key, 32, out);
 }
 
+/* True for an already-derived 64-hex-digit PSK. */
 static int is_hex64(const char *s)
 {
     if (strlen(s) != 64) return 0;
@@ -279,6 +325,7 @@ static int is_hex64(const char *s)
     return 1;
 }
 
+/* Fills in network id's settings: SSID, then WPA-PSK, WEP or open. */
 static int write_network(int id, const char *ssid, const char *psk, int secured)
 {
     char hex[70];
@@ -287,23 +334,30 @@ static int write_network(int id, const char *ssid, const char *psk, int secured)
     wpa_ok("SET_NETWORK %d scan_ssid 1", id);
     if (secured == 1 && psk && *psk) {
         char hex[65];
-        if (is_hex64(psk)) str_copy(hex, sizeof hex, psk);
-        else wpa_psk_hex(psk, ssid, hex); /* old saved entries */
+        if (is_hex64(psk))
+            str_copy(hex, sizeof hex, psk);
+        else
+            wpa_psk_hex(psk, ssid, hex); /* old saved entries */
         if (wpa_ok("SET_NETWORK %d psk %s", id, hex)) return -1;
         wpa_ok("SET_NETWORK %d key_mgmt WPA-PSK", id);
-    } else if (secured == 2 && psk && *psk) {
+    }
+    else if (secured == 2 && psk && *psk) {
         wpa_ok("SET_NETWORK %d key_mgmt NONE", id);
         size_t l = strlen(psk);
-        if (l == 10 || l == 26) wpa_ok("SET_NETWORK %d wep_key0 %s", id, psk);
-        else wpa_ok("SET_NETWORK %d wep_key0 \"%s\"", id, psk);
+        if (l == 10 || l == 26)
+            wpa_ok("SET_NETWORK %d wep_key0 %s", id, psk);
+        else
+            wpa_ok("SET_NETWORK %d wep_key0 \"%s\"", id, psk);
         wpa_ok("SET_NETWORK %d wep_tx_keyidx 0", id);
         wpa_ok("SET_NETWORK %d auth_alg OPEN SHARED", id);
-    } else {
+    }
+    else {
         wpa_ok("SET_NETWORK %d key_mgmt NONE", id);
     }
     return 0;
 }
 
+/* Creates a network entry in wpa_supplicant; returns its id or -1. */
 static int add_network(const char *ssid, const char *psk, int secured, int priority)
 {
     char reply[32];
@@ -318,6 +372,7 @@ static int add_network(const char *ssid, const char *psk, int secured, int prior
     return id;
 }
 
+/* Asks dhcpcd for an address on wlan0. */
 static void start_dhcp(void)
 {
     /* dhcpcd 8: -b backgrounds immediately, -n rebinds if already running. */
@@ -327,6 +382,7 @@ static void start_dhcp(void)
     dhcp_started_ms = now_ms();
 }
 
+/* Writes fallback DNS servers if DHCP didn't provide any. */
 static void ensure_resolv_conf(void)
 {
     char *d = file_read("/etc/resolv.conf", NULL);
@@ -337,7 +393,8 @@ static void ensure_resolv_conf(void)
     char buf[256], tmp[128];
     size_t o = 0;
     str_copy(tmp, sizeof tmp, dns);
-    for (char *t = strtok(tmp, " ,"); t; t = strtok(NULL, " ,")) o += (size_t)snprintf(buf + o, sizeof buf - o, "nameserver %s\n", t);
+    for (char *t = strtok(tmp, " ,"); t; t = strtok(NULL, " ,"))
+        o += (size_t)snprintf(buf + o, sizeof buf - o, "nameserver %s\n", t);
     FILE *f = fopen("/etc/resolv.conf", "w");
     if (f) {
         fwrite(buf, 1, o, f);
@@ -348,6 +405,10 @@ static void ensure_resolv_conf(void)
 
 /* ---------- public API ---------- */
 
+/*
+ * Connects to wpa_supplicant (waiting up to 20 s for it), resets its configuration and
+ * starts connecting to the saved networks, best first.
+ */
 int wifi_init(void)
 {
     memset(&st, 0, sizeof st);
@@ -383,6 +444,7 @@ int wifi_init(void)
 
 const wifi_status *wifi_get(void) { return &st; }
 
+/* Starts a scan; results are collected a few seconds later by wifi_poll(). */
 void wifi_scan(void)
 {
     char reply[32];
@@ -393,6 +455,7 @@ void wifi_scan(void)
     bump();
 }
 
+/* Parses SCAN_RESULTS into st.aps: one entry per SSID (strongest BSS), sorted by signal. */
 static void fetch_scan_results(void)
 {
     static char buf[8192];
@@ -419,11 +482,17 @@ static void fetch_scan_results(void)
         if (!ssid[0]) continue;
         int sig = atoi(f[2]);
         if (sig > 0) sig = sig / 2 - 100; /* some drivers report quality */
+        /* security: 0 open, 1 WPA-PSK, 2 WEP, 3 unsupported (enterprise / WPA3-only) */
         int sec = 0;
-        if (strstr(f[3], "EAP")) sec = 3;
-        else if (strstr(f[3], "PSK")) sec = 1;
-        else if (strstr(f[3], "WEP")) sec = 2;
-        else if (strstr(f[3], "SAE")) sec = 3;
+        if (strstr(f[3], "EAP"))
+            sec = 3;
+        else if (strstr(f[3], "PSK"))
+            sec = 1;
+        else if (strstr(f[3], "WEP"))
+            sec = 2;
+        else if (strstr(f[3], "SAE"))
+            sec = 3;
+        /* several access points with the same name: keep the strongest */
         int dup = -1;
         for (int i = 0; i < n; i++)
             if (!strcmp(aps[i].ssid, ssid)) dup = i;
@@ -439,18 +508,23 @@ static void fetch_scan_results(void)
     /* sort by signal, strongest first */
     for (int i = 1; i < n; i++)
         for (int j = i; j > 0 && aps[j].signal > aps[j - 1].signal; j--) {
-            wifi_ap t = aps[j]; aps[j] = aps[j - 1]; aps[j - 1] = t;
+            wifi_ap t = aps[j];
+            aps[j] = aps[j - 1];
+            aps[j - 1] = t;
         }
+    /* an empty result usually means the scan hasn't finished; retry a couple of times */
     if (n > 0 || scan_results_tries >= 3) {
         memcpy(st.aps, aps, sizeof(wifi_ap) * (size_t)n);
         st.n_aps = n;
         st.scanning = 0;
         bump();
-    } else {
+    }
+    else {
         next_scan_results_ms = now_ms() + 2000;
     }
 }
 
+/* Connects to ssid. For WPA the passphrase is turned into the hex PSK here (~150 ms). */
 void wifi_connect(const char *ssid, const char *psk, int secured)
 {
     tdlog("wifi: connecting to '%s' (sec=%d)", ssid, secured);
@@ -495,6 +569,7 @@ void wifi_connect(const char *ssid, const char *psk, int secured)
     bump();
 }
 
+/* Removes a saved network, disconnecting if it's the current one. */
 void wifi_forget(const char *ssid)
 {
     int j = 0;
@@ -512,6 +587,11 @@ void wifi_forget(const char *ssid)
     }
 }
 
+/*
+ * Called from the UI loop. Handles scan results, refreshes the list now and then while
+ * disconnected, and once a second maps wpa_supplicant's state to ours:
+ *   associated + IP -> CONNECTED, associated -> DHCP, otherwise CONNECTING / FAILED.
+ */
 void wifi_poll(void)
 {
     uint64_t now = now_ms();
@@ -536,12 +616,16 @@ void wifi_poll(void)
         }
         return;
     }
+    /* pull wpa_state and ssid out of the STATUS reply */
     char wpa_state[32] = "", ssid[33] = "";
     for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
-        if (!strncmp(line, "wpa_state=", 10)) str_copy(wpa_state, sizeof wpa_state, line + 10);
-        else if (!strncmp(line, "ssid=", 5)) ssid_decode(line + 5, ssid, sizeof ssid);
+        if (!strncmp(line, "wpa_state=", 10))
+            str_copy(wpa_state, sizeof wpa_state, line + 10);
+        else if (!strncmp(line, "ssid=", 5))
+            ssid_decode(line + 5, ssid, sizeof ssid);
     }
     int completed = !strcmp(wpa_state, "COMPLETED");
+    /* count handshakes that started and then fell back: that's how a wrong key shows up */
     int in_handshake = !strcmp(wpa_state, "4WAY_HANDSHAKE") || !strcmp(wpa_state, "GROUP_HANDSHAKE");
     int was_handshake = !strcmp(last_wpa_state, "4WAY_HANDSHAKE") || !strcmp(last_wpa_state, "GROUP_HANDSHAKE");
     if (was_handshake && !in_handshake && !completed) {
@@ -553,6 +637,7 @@ void wifi_poll(void)
     char ip[16];
     get_ip(ip, sizeof ip);
 
+    /* work out the new state */
     wifi_state ns = st.state;
     if (completed) {
         if (ssid[0] && strcmp(ssid, st.ssid)) str_copy(st.ssid, sizeof st.ssid, ssid);
@@ -570,7 +655,8 @@ void wifi_poll(void)
                     pending.active = 0;
                 }
             }
-        } else {
+        }
+        else {
             ns = WS_DHCP;
             if (dhcp_started && now - dhcp_started_ms > 30000) {
                 ns = WS_FAILED;
@@ -578,22 +664,28 @@ void wifi_poll(void)
                 start_dhcp(); /* keep trying in the background */
             }
         }
-    } else {
+    }
+    else {
         if (last_was_completed) tdlog("wifi: link lost (state %s)", wpa_state);
+        /* not associated: lost link, gave up, or wpa_supplicant reconnecting on its own */
         if (st.state == WS_CONNECTED || st.state == WS_DHCP) {
             ns = WS_CONNECTING;
             connect_started_ms = now;
-        } else if (st.state == WS_CONNECTING && (handshake_fails >= 2 || now - connect_started_ms > 30000)) {
+        }
+        else if (st.state == WS_CONNECTING && (handshake_fails >= 2 || now - connect_started_ms > 30000)) {
             ns = WS_FAILED;
             st.auth_failed = handshake_fails >= 1 || in_handshake || !strcmp(wpa_state, "ASSOCIATED");
             str_copy(st.message, sizeof st.message, st.auth_failed ? "Wrong password" : "Network not reachable");
-        } else if (st.state == WS_IDLE && strcmp(wpa_state, "DISCONNECTED") && strcmp(wpa_state, "INACTIVE") && strcmp(wpa_state, "SCANNING") && wpa_state[0]) {
+        }
+        else if (st.state == WS_IDLE && strcmp(wpa_state, "DISCONNECTED") && strcmp(wpa_state, "INACTIVE") &&
+                 strcmp(wpa_state, "SCANNING") && wpa_state[0]) {
             ns = WS_CONNECTING;
             connect_started_ms = now;
         }
     }
     last_was_completed = completed;
     if (ns == WS_FAILED && completed && ip[0]) ns = WS_CONNECTED;
+    /* publish changes */
     if (ns != st.state || strcmp(ip, st.ip)) {
         st.state = ns;
         str_copy(st.ip, sizeof st.ip, ip);
@@ -613,6 +705,7 @@ void wifi_poll(void)
     }
 }
 
+/* Reconnects to a saved network with its stored key. */
 int wifi_connect_saved(const char *ssid)
 {
     for (int i = 0; i < n_saved; i++) {

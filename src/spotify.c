@@ -1,3 +1,10 @@
+/*
+ * Spotify Web API client, running on its own "network" thread. It owns the OAuth tokens,
+ * polls /v1/me/player for what's playing, and sends the UI's commands (next, previous,
+ * play/pause, volume). Everything the UI shows goes through g_sp, guarded by g_sp.mu;
+ * publish() bumps g_sp.version and wakes the UI thread to repaint.
+ */
+
 #include "spotify.h"
 
 #include <errno.h>
@@ -16,6 +23,7 @@
 
 sp_shared g_sp = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .volume = -1, .supports_volume = 1};
 
+/* connections, tokens and settings: only touched by the worker thread */
 static https_conn accounts, api;
 static char access_token[512];
 static char refresh_token[512];
@@ -23,15 +31,15 @@ static uint64_t token_expiry_ms;
 static char client_id[128], client_secret[128], redirect_uri[256];
 static int poll_ms, idle_poll_ms, volume_step;
 
+/* JSON token storage for the current response (worker thread only) */
 static jtok toks[3000];
 
 /* ---------- small helpers ---------- */
 
-static void bump_locked(void)
-{
-    g_sp.version++;
-}
+/* Marks the shared state as changed. Caller holds g_sp.mu. */
+static void bump_locked(void) { g_sp.version++; }
 
+/* Marks the state changed and wakes the UI to repaint. */
 static void publish(void)
 {
     /* call with lock held */
@@ -39,6 +47,7 @@ static void publish(void)
     ui_wake();
 }
 
+/* Updates the auth state / message shown on the auth screen (only repaints on change). */
 static void set_auth(sp_auth_state s, const char *msg)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -50,6 +59,7 @@ static void set_auth(sp_auth_state s, const char *msg)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
+/* Shows a short message on the player screen for 4 seconds. */
 static void toast(const char *msg)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -59,13 +69,12 @@ static void toast(const char *msg)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
-int spotify_configured(void)
-{
-    return client_id[0] && client_secret[0] && client_id[0] != '<';
-}
+/* Whether client_id/secret are set (and not still the example placeholders). */
+int spotify_configured(void) { return client_id[0] && client_secret[0] && client_id[0] != '<'; }
 
 const char *spotify_redirect_uri(void) { return redirect_uri; }
 
+/* Builds the accounts.spotify.com login URL (with our anti-CSRF state) for the web page. */
 int spotify_authorize_url(char *out, size_t outlen)
 {
     if (!spotify_configured()) return -1;
@@ -84,6 +93,7 @@ int spotify_authorize_url(char *out, size_t outlen)
 
 static void token_path(char *p, size_t l) { path_join(p, l, "spotify_token"); }
 
+/* The refresh token is the only persistent credential (spotify_token, mode 0600). */
 static void load_refresh_token(void)
 {
     char p[300];
@@ -112,6 +122,11 @@ static void save_refresh_token(void)
 
 /* ---------- accounts.spotify.com ---------- */
 
+/*
+ * POSTs to /api/token with the app's client credentials and stores the tokens returned.
+ * Returns 0 on success, -1 if the grant was rejected (re-auth needed), -2 on transient
+ * errors (network, 5xx, rate limit) worth retrying.
+ */
 static int token_request(const char *form)
 {
     char creds[300], b64[420], hdr[600];
@@ -140,7 +155,8 @@ static int token_request(const char *form)
                 }
                 rc = 0;
             }
-        } else {
+        }
+        else {
             char err[64] = "", desc[128] = "";
             json_str(&d, json_get(&d, 0, "error"), err, sizeof err);
             json_str(&d, json_get(&d, 0, "error_description"), desc, sizeof desc);
@@ -150,7 +166,8 @@ static int token_request(const char *form)
             set_auth(g_sp.auth, m);
             rc = (r.status >= 500 || r.status == 429) ? -2 : -1;
         }
-    } else {
+    }
+    else {
         tdlog("spotify: token response %d unparsable", r.status);
         rc = r.status >= 500 ? -2 : -1;
     }
@@ -158,6 +175,7 @@ static int token_request(const char *form)
     return rc;
 }
 
+/* Authorization code (from the login redirect) -> access + refresh token. */
 static int exchange_code(const char *code)
 {
     char c[1024], ru[512], form[1700];
@@ -167,6 +185,7 @@ static int exchange_code(const char *code)
     return token_request(form);
 }
 
+/* Uses the refresh token to get a new access token (they last an hour). */
 static int refresh_access(void)
 {
     char rt[1024], form[1200];
@@ -177,6 +196,10 @@ static int refresh_access(void)
 
 /* ---------- api.spotify.com ---------- */
 
+/*
+ * Authenticated request to api.spotify.com. A 401 forces a token refresh; a 429 waits out
+ * the rate limit (up to a minute).
+ */
 static int api_call(const char *method, const char *path, http_resp *r)
 {
     char hdr[700];
@@ -191,6 +214,7 @@ static int api_call(const char *method, const char *path, http_resp *r)
     return 0;
 }
 
+/* Comma-separated artist names from an "artists" array. */
 static void join_artists(json_doc *d, int arr, char *out, size_t outlen)
 {
     out[0] = 0;
@@ -225,18 +249,26 @@ static void pick_image(json_doc *d, int arr, char *out, size_t outlen)
     }
 }
 
+/*
+ * GET /v1/me/player and publish track, progress, device and volume.
+ * Returns 0 on success, -1 on failure.
+ */
 static int poll_player(void)
 {
     http_resp r;
     uint64_t t0 = now_ms();
     if (api_call("GET", "/v1/me/player?market=from_token&additional_types=episode", &r) < 0) {
         pthread_mutex_lock(&g_sp.mu);
-        if (g_sp.last_poll_ok) { g_sp.last_poll_ok = 0; publish(); }
+        if (g_sp.last_poll_ok) {
+            g_sp.last_poll_ok = 0;
+            publish();
+        }
         pthread_mutex_unlock(&g_sp.mu);
         return -1;
     }
     uint64_t t1 = now_ms();
     int rc = 0;
+    /* nothing is playing anywhere */
     if (r.status == 204 || (r.status == 200 && r.body_len == 0)) {
         pthread_mutex_lock(&g_sp.mu);
         art_request("");
@@ -248,13 +280,16 @@ static int poll_player(void)
             publish();
         }
         pthread_mutex_unlock(&g_sp.mu);
-    } else if (r.status == 200) {
+    }
+    else if (r.status == 200) {
         json_doc d;
         int n = json_parse(&d, r.body, r.body_len, toks, ARRAY_LEN(toks));
         if (n <= 0) {
             tdlog("spotify: player JSON parse error %d (len %zu)", n, r.body_len);
             rc = -1;
-        } else {
+        }
+        else {
+            /* track (or podcast episode) details */
             int item = json_get(&d, 0, "item");
             char title[256] = "", artist[256] = "", album[256] = "", device[64] = "";
             int has_item = !json_is_null(&d, item);
@@ -268,13 +303,15 @@ static int poll_player(void)
                     join_artists(&d, artists, artist, sizeof artist);
                     json_str(&d, json_path(&d, item, "album.name"), album, sizeof album);
                     pick_image(&d, json_path(&d, item, "album.images"), image, sizeof image);
-                } else { /* podcast episode */
+                }
+                else { /* podcast episode */
                     json_str(&d, json_path(&d, item, "show.name"), artist, sizeof artist);
                     json_str(&d, json_path(&d, item, "show.publisher"), album, sizeof album);
                     pick_image(&d, json_get(&d, item, "images"), image, sizeof image);
                     if (!image[0]) pick_image(&d, json_path(&d, item, "show.images"), image, sizeof image);
                 }
             }
+            /* active device and playback position */
             int dev = json_get(&d, 0, "device");
             json_str(&d, json_get(&d, dev, "name"), device, sizeof device);
             int vol_tok = json_get(&d, dev, "volume_percent");
@@ -300,7 +337,10 @@ static int poll_player(void)
             str_copy(g_sp.album, sizeof g_sp.album, album);
             str_copy(g_sp.device, sizeof g_sp.device, device);
             g_sp.is_playing = playing;
-            if (sup_vol != g_sp.supports_volume) { g_sp.supports_volume = sup_vol; changed = 1; }
+            if (sup_vol != g_sp.supports_volume) {
+                g_sp.supports_volume = sup_vol;
+                changed = 1;
+            }
             g_sp.duration_ms = duration;
             /* Time sync: the reported position was sampled roughly mid-request. */
             g_sp.progress_ms = progress;
@@ -310,11 +350,14 @@ static int poll_player(void)
                 changed = 1;
             }
             g_sp.last_poll_ok = 1;
-            if (changed) tdlog("spotify: %s '%s' - '%s' on '%s' vol %d", playing ? "playing" : "paused", title, artist, device, vol);
+            if (changed)
+                tdlog("spotify: %s '%s' - '%s' on '%s' vol %d", playing ? "playing" : "paused", title, artist, device,
+                      vol);
             publish(); /* progress resync always repaints */
             pthread_mutex_unlock(&g_sp.mu);
         }
-    } else if (r.status != 401 && r.status != 429) {
+    }
+    else if (r.status != 401 && r.status != 429) {
         tdlog("spotify: player status %d: %.200s", r.status, r.body ? r.body : "");
         rc = -1;
     }
@@ -322,6 +365,7 @@ static int poll_player(void)
     return rc;
 }
 
+/* Turns a failed player command into a short message, using Spotify's "reason" field. */
 static void control_error(const http_resp *r, char *out, size_t outlen)
 {
     char reason[48] = "", message[96] = "";
@@ -331,17 +375,27 @@ static void control_error(const http_resp *r, char *out, size_t outlen)
         json_str(&d, json_get(&d, e, "reason"), reason, sizeof reason);
         json_str(&d, json_get(&d, e, "message"), message, sizeof message);
     }
-    if (!strcmp(reason, "PREMIUM_REQUIRED")) str_copy(out, outlen, "Spotify Premium is required for controls");
-    else if (!strcmp(reason, "VOLUME_CONTROL_DISALLOW")) str_copy(out, outlen, "This device doesn't allow remote volume");
-    else if (!strcmp(reason, "NO_ACTIVE_DEVICE") || r->status == 404) str_copy(out, outlen, "No active Spotify device");
-    else if (!strcmp(reason, "NO_PREV_TRACK")) str_copy(out, outlen, "No previous track");
-    else if (!strcmp(reason, "NO_NEXT_TRACK")) str_copy(out, outlen, "No next track");
-    else if (!strcmp(reason, "ALREADY_PAUSED") || !strcmp(reason, "ALREADY_PLAYING")) out[0] = 0;
-    else if (r->status == 429) str_copy(out, outlen, "Rate limited by Spotify");
-    else if (message[0]) snprintf(out, outlen, "Spotify: %s", message);
-    else snprintf(out, outlen, "Command failed (%d)", r->status);
+    if (!strcmp(reason, "PREMIUM_REQUIRED"))
+        str_copy(out, outlen, "Spotify Premium is required for controls");
+    else if (!strcmp(reason, "VOLUME_CONTROL_DISALLOW"))
+        str_copy(out, outlen, "This device doesn't allow remote volume");
+    else if (!strcmp(reason, "NO_ACTIVE_DEVICE") || r->status == 404)
+        str_copy(out, outlen, "No active Spotify device");
+    else if (!strcmp(reason, "NO_PREV_TRACK"))
+        str_copy(out, outlen, "No previous track");
+    else if (!strcmp(reason, "NO_NEXT_TRACK"))
+        str_copy(out, outlen, "No next track");
+    else if (!strcmp(reason, "ALREADY_PAUSED") || !strcmp(reason, "ALREADY_PLAYING"))
+        out[0] = 0;
+    else if (r->status == 429)
+        str_copy(out, outlen, "Rate limited by Spotify");
+    else if (message[0])
+        snprintf(out, outlen, "Spotify: %s", message);
+    else
+        snprintf(out, outlen, "Command failed (%d)", r->status);
 }
 
+/* Sends a player command; shows a toast if it fails. Returns 0 on success. */
 static int run_command(const char *method, const char *path)
 {
     http_resp r;
@@ -363,6 +417,7 @@ static int run_command(const char *method, const char *path)
 
 /* ---------- worker ---------- */
 
+/* Sleeps until deadline_ms, or earlier if a command or auth code arrives. */
 static void wait_for(uint64_t deadline_ms)
 {
     /* sleeps until deadline or until a command/auth code/network change arrives */
@@ -375,7 +430,10 @@ static void wait_for(uint64_t deadline_ms)
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += (time_t)(left / 1000);
         ts.tv_nsec += (long)(left % 1000) * 1000000L;
-        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
         int e = pthread_cond_timedwait(&g_sp.cv, &g_sp.mu, &ts);
         if (e == ETIMEDOUT) {
             /* the realtime clock can jump (NTP); re-check monotonic deadline */
@@ -385,6 +443,11 @@ static void wait_for(uint64_t deadline_ms)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
+/*
+ * The network thread. Each pass: wait for Wi-Fi, sync the clock, make sure we have a
+ * valid access token (handling new logins and logouts), send queued commands, then poll
+ * the player, sleeping in between.
+ */
 static void *worker(void *arg)
 {
     (void)arg;
@@ -395,6 +458,7 @@ static void *worker(void *arg)
         pthread_mutex_lock(&g_sp.mu);
         int net_up = g_sp.net_up;
         pthread_mutex_unlock(&g_sp.mu);
+        /* no Wi-Fi: drop connections and wait */
         if (!net_up) {
             set_auth(SP_WAIT_NETWORK, NULL);
             https_close(&api);
@@ -403,6 +467,7 @@ static void *worker(void *arg)
             continue;
         }
         uint64_t now = now_ms();
+        /* set the clock once (TLS certificate checks need a sane time) */
         if (!ntp_ok && now >= next_ntp) {
             const char *srv = config_get("network", "ntp_server", "pool.ntp.org");
             ntp_ok = sntp_sync(srv) == 0 || sntp_sync("time.google.com") == 0;
@@ -439,6 +504,7 @@ static void *worker(void *arg)
             pthread_mutex_unlock(&g_sp.mu);
         }
 
+        /* a fresh login from the web page / auth.sh */
         if (code[0]) {
             set_auth(SP_AUTHORIZING, "Authorizing...");
             int rc = exchange_code(code);
@@ -446,18 +512,21 @@ static void *worker(void *arg)
                 tdlog("spotify: authorized");
                 set_auth(SP_READY, "");
                 next_poll = 0;
-            } else {
+            }
+            else {
                 set_auth(SP_NEED_AUTH, NULL); /* message set by token_request */
             }
             continue;
         }
 
+        /* never logged in (or logged out): wait for the user */
         if (!refresh_token[0]) {
             set_auth(SP_NEED_AUTH, NULL);
             wait_for(now_ms() + 5000);
             continue;
         }
 
+        /* access token missing or about to expire: refresh it */
         if (!access_token[0] || now_ms() + 60000 > token_expiry_ms) {
             if (g_sp.auth != SP_READY) set_auth(SP_AUTHORIZING, "Signing in...");
             int rc = refresh_access();
@@ -468,7 +537,8 @@ static void *worker(void *arg)
                 save_refresh_token();
                 set_auth(SP_NEED_AUTH, NULL);
                 continue;
-            } else if (rc == -2) {
+            }
+            else if (rc == -2) {
                 wait_for(now_ms() + 5000);
                 continue;
             }
@@ -502,6 +572,7 @@ static void *worker(void *arg)
         }
 
         now = now_ms();
+        /* poll faster while playing; back off after errors */
         if (now >= next_poll) {
             int ok = poll_player() == 0;
             pthread_mutex_lock(&g_sp.mu);
@@ -519,11 +590,13 @@ static void *worker(void *arg)
     return NULL;
 }
 
+/* Reads the [spotify] settings and starts the network thread. */
 void spotify_start(void)
 {
     str_copy(client_id, sizeof client_id, config_get("spotify", "client_id", ""));
     str_copy(client_secret, sizeof client_secret, config_get("spotify", "client_secret", ""));
-    str_copy(redirect_uri, sizeof redirect_uri, config_get("spotify", "redirect_uri", "http://127.0.0.1:8080/callback"));
+    str_copy(redirect_uri, sizeof redirect_uri,
+             config_get("spotify", "redirect_uri", "http://127.0.0.1:8080/callback"));
     poll_ms = config_int("spotify", "poll_interval_ms", 2000);
     idle_poll_ms = config_int("spotify", "idle_poll_interval_ms", 5000);
     volume_step = config_int("spotify", "volume_step", 10);
@@ -543,6 +616,7 @@ void spotify_start(void)
     pthread_detach(t);
 }
 
+/* Queues a command (CMD_*) for the network thread. */
 void spotify_command(int cmd)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -551,6 +625,10 @@ void spotify_command(int cmd)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
+/*
+ * Hands a login code to the network thread. A non-empty state must match the one in our
+ * login URL, so a stale or forged redirect is rejected.
+ */
 int spotify_submit_code(const char *code, const char *state)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -563,6 +641,10 @@ int spotify_submit_code(const char *code, const char *state)
     return ok ? 0 : -1;
 }
 
+/*
+ * Changes volume by one step. The new value shows immediately and polls won't overwrite
+ * it for 3 s, so repeated taps feel responsive.
+ */
 void spotify_volume_step(int dir)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -577,6 +659,7 @@ void spotify_volume_step(int dir)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
+/* Flips play/pause immediately on screen and queues the matching command. */
 void spotify_toggle_play(void)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -596,6 +679,7 @@ void spotify_toggle_play(void)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
+/* Called by the UI when Wi-Fi changes; wakes the network thread if it came up. */
 void spotify_set_net(int up, const char *ip, const char *ssid, int signal)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -610,6 +694,7 @@ void spotify_set_net(int up, const char *ip, const char *ssid, int signal)
     pthread_mutex_unlock(&g_sp.mu);
 }
 
+/* Playback position "now": the last synced position plus time elapsed since (if playing). */
 int spotify_progress_now(void)
 {
     pthread_mutex_lock(&g_sp.mu);

@@ -1,3 +1,9 @@
+/*
+ * Album art. The Spotify thread calls art_request() with the current cover URL on every
+ * poll; a dedicated thread downloads and decodes new covers so slow image fetches never
+ * delay playback controls. The last few covers are cached, already scaled for the screen.
+ */
+
 #include "art.h"
 
 #include <pthread.h>
@@ -8,6 +14,7 @@
 #include "https.h"
 #include "spotify.h"
 
+/* stb_image (JPEG/PNG only), with its warnings silenced */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wall"
 #pragma GCC diagnostic ignored "-Wextra"
@@ -24,6 +31,7 @@
 #include "stb_image.h"
 #pragma GCC diagnostic pop
 
+/* cache of decoded covers, least recently used is evicted */
 #define CACHE_N 6
 #define URL_MAX 256
 
@@ -33,6 +41,7 @@ typedef struct {
     uint64_t used;
 } entry;
 
+/* shared between the Spotify thread (requests), art thread (fetches) and UI (drawing) */
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 static char want[URL_MAX];
@@ -41,6 +50,7 @@ static const uint32_t *cur; /* art for `want`, or NULL */
 static entry cache[CACHE_N];
 static https_conn conn;
 
+/* Tells the UI thread to repaint (same mechanism the Spotify state uses). */
 static void notify_ui(void)
 {
     pthread_mutex_lock(&g_sp.mu);
@@ -49,6 +59,7 @@ static void notify_ui(void)
     ui_wake();
 }
 
+/* Cached entry for url, or NULL. Caller holds mu. */
 static entry *lookup(const char *url)
 {
     for (int i = 0; i < CACHE_N; i++)
@@ -56,6 +67,10 @@ static entry *lookup(const char *url)
     return NULL;
 }
 
+/*
+ * Called on every poll; does nothing unless the URL changed. Cached covers show
+ * immediately, otherwise the art thread is woken to fetch it.
+ */
 void art_request(const char *url)
 {
     if (!url) url = "";
@@ -74,6 +89,7 @@ void art_request(const char *url)
     pthread_mutex_unlock(&mu);
 }
 
+/* Draws the cover for the current URL, if it has been loaded. */
 int art_draw(int x, int y, int radius)
 {
     pthread_mutex_lock(&mu);
@@ -112,6 +128,7 @@ static uint32_t *scale(const unsigned char *rgb, int w, int h)
     return out;
 }
 
+/* Downloads one image (reusing a kept-alive connection to its host) and decodes it. */
 static uint32_t *fetch(const char *url)
 {
     const char *p = url;
@@ -139,13 +156,15 @@ static uint32_t *fetch(const char *url)
     uint32_t *px = NULL;
     if (r.status != 200) {
         tdlog("art: HTTP %d for %.80s", r.status, url);
-    } else {
+    }
+    else {
         uint64_t t1 = now_ms();
         int w, h, n;
         unsigned char *rgb = stbi_load_from_memory((const unsigned char *)r.body, (int)r.body_len, &w, &h, &n, 3);
         if (!rgb) {
             tdlog("art: decode failed (%s), %zu bytes", stbi_failure_reason(), r.body_len);
-        } else {
+        }
+        else {
             px = scale(rgb, w, h);
             stbi_image_free(rgb);
             tdlog("art: %dx%d, %zu bytes, fetch %llums, decode+scale %llums", w, h, r.body_len,
@@ -156,6 +175,10 @@ static uint32_t *fetch(const char *url)
     return px;
 }
 
+/*
+ * Art thread: waits for a new URL, fetches it, stores it in the cache and repaints if
+ * it's still the one wanted (the track may have changed in the meantime).
+ */
 static void *worker(void *arg)
 {
     (void)arg;
@@ -178,7 +201,10 @@ static void *worker(void *arg)
         for (int i = 0; i < CACHE_N; i++) {
             entry *e = &cache[i];
             if (e->px && e->px == cur) continue;
-            if (!e->px) { slot = e; break; }
+            if (!e->px) {
+                slot = e;
+                break;
+            }
             if (!slot || e->used < slot->used) slot = e;
         }
         free(slot->px);
@@ -193,6 +219,7 @@ static void *worker(void *arg)
     return NULL;
 }
 
+/* Starts the art thread (256 KB stack for the JPEG decoder). */
 void art_start(void)
 {
     https_init(&conn, "i.scdn.co");

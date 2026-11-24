@@ -9,7 +9,7 @@
 #define TD_VERSION "0.1.0"
 #define WIFI_IFACE "wlan0"
 
-#define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
+#define ARRAY_LEN(a)     (sizeof(a) / sizeof((a)[0]))
 #define CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
 
 /* Directory holding config + state (default /config/thermodeck, or argv[1]). */

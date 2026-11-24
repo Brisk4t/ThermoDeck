@@ -6,10 +6,12 @@
 #include "json.h"
 
 static const char *PLAYER =
-  "{\"device\":{\"id\":\"x\",\"is_active\":true,\"name\":\"Kitchen \\u00e9 Speaker\",\"volume_percent\":42},"
-  "\"shuffle_state\":false,\"progress_ms\":61234,\"item\":{\"album\":{\"name\":\"Alb\\\"um\",\"images\":[{\"url\":\"u\",\"width\":64}]},"
-  "\"artists\":[{\"name\":\"A1\",\"id\":\"1\"},{\"name\":\"B\\u00f6\",\"id\":\"2\"}],\"duration_ms\":200000,\"name\":\"Song \\ud83d\\ude00 x\",\"empty\":{},\"arr\":[]},"
-  "\"currently_playing_type\":\"track\",\"is_playing\":true,\"context\":null}";
+    "{\"device\":{\"id\":\"x\",\"is_active\":true,\"name\":\"Kitchen \\u00e9 Speaker\",\"volume_percent\":42},"
+    "\"shuffle_state\":false,\"progress_ms\":61234,\"item\":{\"album\":{\"name\":\"Alb\\\"um\",\"images\":[{\"url\":"
+    "\"u\",\"width\":64}]},"
+    "\"artists\":[{\"name\":\"A1\",\"id\":\"1\"},{\"name\":\"B\\u00f6\",\"id\":\"2\"}],\"duration_ms\":200000,\"name\":"
+    "\"Song \\ud83d\\ude00 x\",\"empty\":{},\"arr\":[]},"
+    "\"currently_playing_type\":\"track\",\"is_playing\":true,\"context\":null}";
 
 int main(void)
 {
@@ -20,10 +22,13 @@ int main(void)
     char s[256];
     int item = json_get(&d, 0, "item");
     assert(item > 0);
-    json_str(&d, json_get(&d, item, "name"), s, sizeof s); printf("title=%s\n", s);
+    json_str(&d, json_get(&d, item, "name"), s, sizeof s);
+    printf("title=%s\n", s);
     assert(!strcmp(s, "Song \xF0\x9F\x98\x80 x"));
-    json_str(&d, json_path(&d, item, "album.name"), s, sizeof s); assert(!strcmp(s, "Alb\"um"));
-    json_str(&d, json_get(&d, json_at(&d, json_get(&d, item, "artists"), 1), "name"), s, sizeof s); assert(!strcmp(s, "B\xC3\xB6"));
+    json_str(&d, json_path(&d, item, "album.name"), s, sizeof s);
+    assert(!strcmp(s, "Alb\"um"));
+    json_str(&d, json_get(&d, json_at(&d, json_get(&d, item, "artists"), 1), "name"), s, sizeof s);
+    assert(!strcmp(s, "B\xC3\xB6"));
     assert(json_at(&d, json_get(&d, item, "artists"), 2) == -1);
     assert(json_int(&d, json_get(&d, item, "duration_ms"), 0) == 200000);
     assert(json_int(&d, json_get(&d, 0, "progress_ms"), 0) == 61234);
@@ -37,7 +42,9 @@ int main(void)
     assert(!strcmp(code, "AQ+x_y"));
     assert(query_param("code=1&state=abc", "state", st, sizeof st) == 0 && !strcmp(st, "abc"));
     assert(query_param("xcode=1", "code", st, sizeof st) == -1);
-    char b64[32]; base64_encode((const unsigned char *)"ab:cd", 5, b64, sizeof b64); assert(!strcmp(b64, "YWI6Y2Q="));
+    char b64[32];
+    base64_encode((const unsigned char *)"ab:cd", 5, b64, sizeof b64);
+    assert(!strcmp(b64, "YWI6Y2Q="));
     puts("json/util OK");
 
     static https_conn c;
@@ -51,7 +58,8 @@ int main(void)
     http_resp_free(&r);
     static https_conn a;
     https_init(&a, "accounts.spotify.com");
-    rc = https_request(&a, "POST", "/api/token", "Content-Type: application/x-www-form-urlencoded\r\n", "grant_type=refresh_token&refresh_token=x", 40, &r);
+    rc = https_request(&a, "POST", "/api/token", "Content-Type: application/x-www-form-urlencoded\r\n",
+                       "grant_type=refresh_token&refresh_token=x", 40, &r);
     printf("accounts: rc=%d status=%d body=%.120s\n", rc, r.status, r.body ? r.body : r.error);
     http_resp_free(&r);
     return 0;

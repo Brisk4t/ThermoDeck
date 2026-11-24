@@ -1,8 +1,15 @@
+/*
+ * Tiny non-validating JSON tokenizer (jsmn style). json_parse() turns the text into a
+ * flat array of tokens in document order, each with its byte range and parent; the
+ * accessors below walk that array. Strings are not copied until json_str() is called.
+ */
+
 #include "json.h"
 
 #include <stdlib.h>
 #include <string.h>
 
+/* Appends a token; returns its index or -1 if the token array is full. */
 static int new_tok(json_doc *d, int max, jtype type, int start, int end, int parent)
 {
     if (d->n >= max) return -1;
@@ -15,6 +22,7 @@ static int new_tok(json_doc *d, int max, jtype type, int start, int end, int par
     return d->n++;
 }
 
+/* Tokenizes js[0..len). Returns the token count, or <0 on overflow / malformed input. */
 int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
 {
     d->js = js;
@@ -25,6 +33,7 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
     while (i < len) {
         char c = js[i];
         switch (c) {
+        /* open a container; it becomes the parent of what follows */
         case '{':
         case '[': {
             int k = new_tok(d, max, c == '{' ? J_OBJ : J_ARR, (int)i, -1, cur);
@@ -34,6 +43,7 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
             i++;
             break;
         }
+        /* close the current container and pop back to its parent */
         case '}':
         case ']': {
             jtype want = c == '}' ? J_OBJ : J_ARR;
@@ -43,6 +53,7 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
             i++;
             break;
         }
+        /* string: token covers the text between the quotes (escapes left as-is) */
         case '"': {
             size_t s = ++i;
             while (i < len && js[i] != '"') {
@@ -56,9 +67,13 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
             i++;
             break;
         }
-        case ' ': case '\t': case '\r': case '\n': case ':': case ',':
-            i++;
-            break;
+        case ' ':
+        case '\t':
+        case '\r':
+        case '\n':
+        case ':':
+        case ',': i++; break;
+        /* number / true / false / null */
         default: {
             size_t s = i;
             while (i < len && !strchr(" \t\r\n,:]}", js[i])) i++;
@@ -69,6 +84,7 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
         }
         }
     }
+    /* every container must have been closed */
     for (int k = 0; k < d->n; k++)
         if ((d->t[k].type == J_OBJ || d->t[k].type == J_ARR) && d->t[k].end < 0) return -4;
     return d->n;
@@ -84,6 +100,7 @@ static int skip(const json_doc *d, int i)
     return j;
 }
 
+/* Value token for key in object obj, or -1. Walks key/value pairs, skipping nested values. */
 int json_get(const json_doc *d, int obj, const char *key)
 {
     if (obj < 0 || obj >= d->n || d->t[obj].type != J_OBJ) return -1;
@@ -91,12 +108,14 @@ int json_get(const json_doc *d, int obj, const char *key)
     int j = obj + 1;
     while (j + 1 < d->n && d->t[j].start < d->t[obj].end) {
         const jtok *kt = &d->t[j];
-        if (kt->type == J_STR && (size_t)(kt->end - kt->start) == kl && !memcmp(d->js + kt->start, key, kl)) return j + 1;
+        if (kt->type == J_STR && (size_t)(kt->end - kt->start) == kl && !memcmp(d->js + kt->start, key, kl))
+            return j + 1;
         j = skip(d, j + 1);
     }
     return -1;
 }
 
+/* Like json_get but follows a dotted path, e.g. "album.name". */
 int json_path(const json_doc *d, int obj, const char *path)
 {
     char part[64];
@@ -112,6 +131,7 @@ int json_path(const json_doc *d, int obj, const char *path)
     return obj;
 }
 
+/* n-th element of array arr, or -1. */
 int json_at(const json_doc *d, int arr, int n)
 {
     if (arr < 0 || arr >= d->n || d->t[arr].type != J_ARR || n >= d->t[arr].size) return -1;
@@ -120,32 +140,56 @@ int json_at(const json_doc *d, int arr, int n)
     return j < d->n ? j : -1;
 }
 
+/* Appends code point cp to out as UTF-8 (dropped if it doesn't fit). */
 static void put_utf8(char *out, size_t outlen, size_t *o, unsigned cp)
 {
     char b[4];
     int n;
-    if (cp < 0x80) { b[0] = (char)cp; n = 1; }
-    else if (cp < 0x800) { b[0] = (char)(0xC0 | (cp >> 6)); b[1] = (char)(0x80 | (cp & 63)); n = 2; }
-    else if (cp < 0x10000) { b[0] = (char)(0xE0 | (cp >> 12)); b[1] = (char)(0x80 | ((cp >> 6) & 63)); b[2] = (char)(0x80 | (cp & 63)); n = 3; }
-    else { b[0] = (char)(0xF0 | (cp >> 18)); b[1] = (char)(0x80 | ((cp >> 12) & 63)); b[2] = (char)(0x80 | ((cp >> 6) & 63)); b[3] = (char)(0x80 | (cp & 63)); n = 4; }
+    if (cp < 0x80) {
+        b[0] = (char)cp;
+        n = 1;
+    }
+    else if (cp < 0x800) {
+        b[0] = (char)(0xC0 | (cp >> 6));
+        b[1] = (char)(0x80 | (cp & 63));
+        n = 2;
+    }
+    else if (cp < 0x10000) {
+        b[0] = (char)(0xE0 | (cp >> 12));
+        b[1] = (char)(0x80 | ((cp >> 6) & 63));
+        b[2] = (char)(0x80 | (cp & 63));
+        n = 3;
+    }
+    else {
+        b[0] = (char)(0xF0 | (cp >> 18));
+        b[1] = (char)(0x80 | ((cp >> 12) & 63));
+        b[2] = (char)(0x80 | ((cp >> 6) & 63));
+        b[3] = (char)(0x80 | (cp & 63));
+        n = 4;
+    }
     if (*o + (size_t)n >= outlen) return;
     memcpy(out + *o, b, (size_t)n);
     *o += (size_t)n;
 }
 
+/* Parses 4 hex digits (for \uXXXX escapes). */
 static unsigned hex4(const char *s)
 {
     unsigned v = 0;
     for (int i = 0; i < 4; i++) {
         char c = s[i];
         v <<= 4;
-        if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
-        else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+        if (c >= '0' && c <= '9')
+            v |= (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            v |= (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            v |= (unsigned)(c - 'A' + 10);
     }
     return v;
 }
 
+/* Copies string token i into out, decoding escapes (including UTF-16 surrogate pairs). */
 int json_str(const json_doc *d, int i, char *out, size_t outlen)
 {
     if (!outlen) return -1;
@@ -154,7 +198,10 @@ int json_str(const json_doc *d, int i, char *out, size_t outlen)
     const char *s = d->js + d->t[i].start, *e = d->js + d->t[i].end;
     size_t o = 0;
     while (s < e && o + 1 < outlen) {
-        if (*s != '\\') { out[o++] = *s++; continue; }
+        if (*s != '\\') {
+            out[o++] = *s++;
+            continue;
+        }
         s++;
         if (s >= e) break;
         char c = *s++;
@@ -185,6 +232,7 @@ int json_str(const json_doc *d, int i, char *out, size_t outlen)
     return 0;
 }
 
+/* Numeric value of a primitive token, or def if it isn't a number. */
 long long json_int(const json_doc *d, int i, long long def)
 {
     if (i < 0 || i >= d->n || d->t[i].type != J_PRIM) return def;
@@ -193,6 +241,7 @@ long long json_int(const json_doc *d, int i, long long def)
     return strtoll(d->js + d->t[i].start, NULL, 10);
 }
 
+/* true/false primitive, or def. */
 int json_bool(const json_doc *d, int i, int def)
 {
     if (i < 0 || i >= d->n || d->t[i].type != J_PRIM) return def;
@@ -200,7 +249,5 @@ int json_bool(const json_doc *d, int i, int def)
     return c == 't' ? 1 : c == 'f' ? 0 : def;
 }
 
-int json_is_null(const json_doc *d, int i)
-{
-    return i < 0 || (d->t[i].type == J_PRIM && d->js[d->t[i].start] == 'n');
-}
+/* Missing (-1) counts as null too. */
+int json_is_null(const json_doc *d, int i) { return i < 0 || (d->t[i].type == J_PRIM && d->js[d->t[i].start] == 'n'); }

@@ -1,3 +1,9 @@
+/*
+ * Minimal HTTPS/1.1 client on BearSSL. One https_conn per host, kept alive between
+ * requests; responses are read fully into memory (Content-Length, chunked, or until close).
+ * Certificates are checked against the embedded Mozilla roots (gen/trust_anchors.c).
+ */
+
 #include "https.h"
 
 #include <errno.h>
@@ -20,6 +26,7 @@ extern const size_t trust_anchors_num;
 
 #define MAX_BODY (512 * 1024)
 
+/* Prepares a (not yet connected) connection to host:443. */
 void https_init(https_conn *c, const char *host)
 {
     memset(c, 0, sizeof *c);
@@ -27,6 +34,7 @@ void https_init(https_conn *c, const char *host)
     c->fd = -1;
 }
 
+/* Drops the socket; the next request reconnects. */
 void https_close(https_conn *c)
 {
     if (c->fd >= 0) close(c->fd);
@@ -41,6 +49,7 @@ void http_resp_free(http_resp *r)
     r->body_len = 0;
 }
 
+/* BearSSL I/O callbacks: plain blocking socket reads/writes. */
 static int sock_read(void *ctx, unsigned char *buf, size_t len)
 {
     int fd = *(int *)ctx;
@@ -63,6 +72,10 @@ static int sock_write(void *ctx, const unsigned char *buf, size_t len)
     }
 }
 
+/*
+ * Resolves host and connects with a 10 s timeout; the socket then gets 15 s read/write
+ * timeouts so a dead server can't hang the calling thread forever.
+ */
 static int tcp_connect(const char *host, int port, char *err, size_t errlen)
 {
     struct addrinfo hints = {0}, *ai = NULL, *p;
@@ -76,6 +89,7 @@ static int tcp_connect(const char *host, int port, char *err, size_t errlen)
         return -1;
     }
     int fd = -1;
+    /* try each address until one connects */
     for (p = ai; p; p = p->ai_next) {
         fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) continue;
@@ -86,8 +100,10 @@ static int tcp_connect(const char *host, int port, char *err, size_t errlen)
             struct pollfd pfd = {fd, POLLOUT, 0};
             int soerr = 0;
             socklen_t sl = sizeof soerr;
-            if (poll(&pfd, 1, 10000) == 1 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0 && soerr == 0) rc = 0;
-            else rc = -1;
+            if (poll(&pfd, 1, 10000) == 1 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0 && soerr == 0)
+                rc = 0;
+            else
+                rc = -1;
         }
         if (rc == 0) {
             fcntl(fd, F_SETFL, fl);
@@ -107,6 +123,10 @@ static int tcp_connect(const char *host, int port, char *err, size_t errlen)
     return fd;
 }
 
+/*
+ * Connects and sets up the TLS client if there's no live connection.
+ * (The handshake itself happens lazily on the first write.)
+ */
 static int ensure_connected(https_conn *c, char *err, size_t errlen)
 {
     if (c->connected) return 0;
@@ -129,11 +149,14 @@ static int ensure_connected(https_conn *c, char *err, size_t errlen)
     return 0;
 }
 
+/* Describes the last failure: a BearSSL error code, or the peer closing. */
 static void tls_error(https_conn *c, const char *what, char *err, size_t errlen)
 {
     int e = br_ssl_engine_last_error(&c->sc.eng);
-    if (e) snprintf(err, errlen, "%s: TLS error %d", what, e);
-    else snprintf(err, errlen, "%s: connection closed", what);
+    if (e)
+        snprintf(err, errlen, "%s: TLS error %d", what, e);
+    else
+        snprintf(err, errlen, "%s: connection closed", what);
 }
 
 /* Buffered reader on top of br_sslio */
@@ -144,6 +167,7 @@ typedef struct {
     int got_any;
 } reader;
 
+/* Refills the buffer with the next decrypted chunk. */
 static int rd_fill(reader *r)
 {
     int n = br_sslio_read(&r->c->ioc, r->buf, sizeof r->buf);
@@ -174,6 +198,7 @@ static int rd_line(reader *r, char *out, size_t outlen)
     return (int)o;
 }
 
+/* Reads exactly n bytes. */
 static int rd_exact(reader *r, char *out, size_t n)
 {
     while (n) {
@@ -188,6 +213,7 @@ static int rd_exact(reader *r, char *out, size_t n)
     return 0;
 }
 
+/* Reads n more body bytes into r->body, growing it (capped at MAX_BODY). */
 static int body_append_exact(reader *rd, http_resp *r, size_t *cap, size_t n)
 {
     if (r->body_len + n > MAX_BODY) return -1;
@@ -204,10 +230,15 @@ static int body_append_exact(reader *rd, http_resp *r, size_t *cap, size_t n)
     return 0;
 }
 
-static int do_request(https_conn *c, const char *method, const char *path, const char *extra,
-                      const char *body, size_t body_len, http_resp *r, int *got_any)
+/*
+ * Sends one request and reads the full response into r. got_any reports whether any
+ * response bytes arrived (used to decide if a retry is safe).
+ */
+static int do_request(https_conn *c, const char *method, const char *path, const char *extra, const char *body,
+                      size_t body_len, http_resp *r, int *got_any)
 {
     char head[2048];
+    /* request line + headers (Accept defaults to JSON unless the caller sets one) */
     int hl = snprintf(head, sizeof head,
                       "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ThermoDeck/" TD_VERSION "\r\n"
                       "%sConnection: keep-alive\r\n%sContent-Length: %zu\r\n\r\n",
@@ -224,7 +255,7 @@ static int do_request(https_conn *c, const char *method, const char *path, const
         return -1;
     }
 
-    static reader rd; /* only used from the network thread */
+    reader rd; /* per call: the Spotify and album-art threads both make requests */
     memset(&rd, 0, sizeof rd);
     rd.c = c;
     char line[1024];
@@ -241,6 +272,7 @@ static int do_request(https_conn *c, const char *method, const char *path, const
             snprintf(r->error, sizeof r->error, "bad status line");
             return -1;
         }
+        /* headers we care about */
         long clen = -1;
         int chunked = 0, close_after = 0;
         for (;;) {
@@ -254,13 +286,18 @@ static int do_request(https_conn *c, const char *method, const char *path, const
             *colon = 0;
             char *v = colon + 1;
             while (*v == ' ') v++;
-            if (!strcasecmp(line, "Content-Length")) clen = atol(v);
-            else if (!strcasecmp(line, "Transfer-Encoding") && strstr(v, "chunked")) chunked = 1;
-            else if (!strcasecmp(line, "Connection") && !strncasecmp(v, "close", 5)) close_after = 1;
-            else if (!strcasecmp(line, "Retry-After")) r->retry_after = atoi(v);
+            if (!strcasecmp(line, "Content-Length"))
+                clen = atol(v);
+            else if (!strcasecmp(line, "Transfer-Encoding") && strstr(v, "chunked"))
+                chunked = 1;
+            else if (!strcasecmp(line, "Connection") && !strncasecmp(v, "close", 5))
+                close_after = 1;
+            else if (!strcasecmp(line, "Retry-After"))
+                r->retry_after = atoi(v);
         }
         if (status >= 100 && status < 200) continue;
 
+        /* body: none, chunked, fixed length, or read-until-close */
         r->status = status;
         size_t cap = 0;
         r->body = malloc(1);
@@ -268,9 +305,9 @@ static int do_request(https_conn *c, const char *method, const char *path, const
         r->body_len = 0;
         cap = 1;
         int no_body = status == 204 || status == 304 || !strcmp(method, "HEAD");
-        if (no_body) {
-            /* nothing */
-        } else if (chunked) {
+        if (no_body) { /* nothing */
+        }
+        else if (chunked) {
             for (;;) {
                 if (rd_line(&rd, line, sizeof line) < 0) goto body_err;
                 long n = strtol(line, NULL, 16);
@@ -283,9 +320,11 @@ static int do_request(https_conn *c, const char *method, const char *path, const
                 if (body_append_exact(&rd, r, &cap, (size_t)n) < 0) goto body_err;
                 if (rd_line(&rd, line, sizeof line) < 0) goto body_err;
             }
-        } else if (clen >= 0) {
+        }
+        else if (clen >= 0) {
             if (body_append_exact(&rd, r, &cap, (size_t)clen) < 0) goto body_err;
-        } else {
+        }
+        else {
             /* read until close */
             for (;;) {
                 if (rd.pos >= rd.len && rd_fill(&rd) < 0) break;
@@ -311,8 +350,9 @@ static int do_request(https_conn *c, const char *method, const char *path, const
     } while (1);
 }
 
-int https_request(https_conn *c, const char *method, const char *path, const char *extra_headers,
-                  const char *body, size_t body_len, http_resp *r)
+/* Public entry point. Reuses the kept-alive connection when possible. */
+int https_request(https_conn *c, const char *method, const char *path, const char *extra_headers, const char *body,
+                  size_t body_len, http_resp *r)
 {
     memset(r, 0, sizeof *r);
     r->status = -1;

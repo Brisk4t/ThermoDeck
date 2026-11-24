@@ -1,7 +1,13 @@
 /* ThermoDeck: Wi-Fi + Spotify remote dashboard for the ecobee (i.MX28) touchscreen.
  *
  * Threads: UI/main (this file: framebuffer, touch, wpa_supplicant), network worker
- * (spotify.c: NTP, OAuth, polling, commands), web server (web.c: OAuth from another device).
+ * (spotify.c: NTP, OAuth, polling, commands), album art (art.c) and the web server
+ * (web.c: login from another device, status page).
+ *
+ * The UI is immediate-mode: every repaint redraws the current screen from scratch into
+ * the back buffer and records the tappable areas ("hits") as it goes; a touch is matched
+ * against the hits from the last repaint. Other threads never draw: they update shared
+ * state and call ui_wake(), and the main loop repaints when something changed.
  */
 #include <errno.h>
 #include <math.h>
@@ -23,25 +29,27 @@
 #include "wifi.h"
 
 /* ---------- palette ---------- */
-#define C_BG 0x121212
-#define C_HEADER 0x1A1A1A
-#define C_CARD 0x1E1E1E
-#define C_BTN 0x2C2C2C
-#define C_BTN_PRESSED 0x4A4A4A
-#define C_BTN_DISABLED 0x1F1F1F
-#define C_LINE 0x2A2A2A
-#define C_TEXT 0xFFFFFF
-#define C_SUB 0xB3B3B3
-#define C_DIM 0x6E6E6E
-#define C_GREEN 0x1DB954
+#define C_BG            0x121212
+#define C_HEADER        0x1A1A1A
+#define C_CARD          0x1E1E1E
+#define C_BTN           0x2C2C2C
+#define C_BTN_PRESSED   0x4A4A4A
+#define C_BTN_DISABLED  0x1F1F1F
+#define C_LINE          0x2A2A2A
+#define C_TEXT          0xFFFFFF
+#define C_SUB           0xB3B3B3
+#define C_DIM           0x6E6E6E
+#define C_GREEN         0x1DB954
 #define C_GREEN_PRESSED 0x3BE477
-#define C_RED 0xE5534B
-#define C_YELLOW 0xE0B341
+#define C_RED           0xE5534B
+#define C_YELLOW        0xE0B341
 
 /* ---------- UI state ---------- */
+/* screens */
 enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER, SCR_TZ, SCR_BRIGHT };
 
 enum {
+    /* ids for everything tappable */
     BTN_NONE = 0,
     BTN_HEADER_WIFI,
     BTN_HEADER_CLOCK,
@@ -67,14 +75,16 @@ enum {
     KEY_CANCEL,
     KEY_OK,
     KEY_SHOW,
-    BTN_ROW0 = 100,     /* + row index on screen */
-    KEY_CHAR = 1000,    /* + character code */
+    BTN_ROW0 = 100,  /* + row index on screen */
+    KEY_CHAR = 1000, /* + character code */
 };
 
-#define LIST_Y 120
+/* scrolling list layout shared by the Wi-Fi and time zone screens */
+#define LIST_Y     120
 #define LIST_ROW_H 56
-#define LIST_ROWS 5
+#define LIST_ROWS  5
 
+/* a tappable rectangle recorded during the last repaint */
 typedef struct {
     int id, x, y, w, h;
 } hit;
@@ -112,15 +122,17 @@ static struct {
     int qr_ok;
     int web_port;
 
-    /* clock settings (clock.conf overrides thermodeck.ini) */
+    /* user settings (settings.conf overrides thermodeck.ini) */
     char tz[64];
     int clock_24h;
     int brightness; /* backlight percent */
     int drag_id;    /* control being dragged (slider), 0 if none */
 } ui;
 
+/* other threads write a byte here to make the main loop repaint */
 static int wake_pipe[2] = {-1, -1};
 
+/* Wakes the UI thread (safe to call from any thread). */
 void ui_wake(void)
 {
     char c = 1;
@@ -130,6 +142,7 @@ void ui_wake(void)
     }
 }
 
+/* Short message shown at the bottom of the current screen for a few seconds. */
 static void ui_toast(const char *msg)
 {
     str_copy(ui.toast, sizeof ui.toast, msg);
@@ -137,36 +150,51 @@ static void ui_toast(const char *msg)
     ui.dirty = 1;
 }
 
+/* Registers a tappable area for the frame being drawn. */
 static void add_hit(int id, int x, int y, int w, int h)
 {
     if (ui.n_hits < (int)ARRAY_LEN(ui.hits)) ui.hits[ui.n_hits++] = (hit){id, x, y, w, h};
 }
 
+/* Whether id was just tapped (draws the pressed highlight briefly). */
 static int is_pressed(int id) { return ui.pressed_id == id && now_ms() < ui.pressed_until; }
 
 /* ---------- widgets ---------- */
 
 enum { BS_NORMAL, BS_PRIMARY, BS_DISABLED };
 
+/* Rounded button with an optional centred label; disabled buttons aren't tappable. */
 static void button(int id, int x, int y, int w, int h, const char *label, const font_t *f, int style)
 {
     uint32_t bg, fg;
     int pressed = is_pressed(id);
     switch (style) {
-    case BS_PRIMARY: bg = pressed ? C_GREEN_PRESSED : C_GREEN; fg = 0x000000; break;
-    case BS_DISABLED: bg = C_BTN_DISABLED; fg = C_DIM; break;
-    default: bg = pressed ? C_BTN_PRESSED : C_BTN; fg = C_TEXT; break;
+    case BS_PRIMARY:
+        bg = pressed ? C_GREEN_PRESSED : C_GREEN;
+        fg = 0x000000;
+        break;
+    case BS_DISABLED:
+        bg = C_BTN_DISABLED;
+        fg = C_DIM;
+        break;
+    default:
+        bg = pressed ? C_BTN_PRESSED : C_BTN;
+        fg = C_TEXT;
+        break;
     }
     gfx_rrect(x, y, w, h, h < 40 ? 8 : 12, bg);
     if (label) {
         int ty = y + (h + f->ascent - f->descent) / 2;
         int tw = gfx_text_width(f, label);
-        if (tw > w - 8) gfx_text_fit(f, x + 4, ty, w - 8, label, fg);
-        else gfx_text(f, x + (w - tw) / 2, ty, label, fg);
+        if (tw > w - 8)
+            gfx_text_fit(f, x + 4, ty, w - 8, label, fg);
+        else
+            gfx_text(f, x + (w - tw) / 2, ty, label, fg);
     }
     if (style != BS_DISABLED) add_hit(id, x, y, w, h);
 }
 
+/* Signal strength in dBm -> 1..4 bars (0 = unknown, shown as 3). */
 static int signal_bars(int dbm)
 {
     if (!dbm) return 3;
@@ -178,6 +206,7 @@ static int signal_bars(int dbm)
 
 #define BARS_W 18 /* 4 bars of 3px with 2px gaps */
 
+/* Four rising bars, the first `level` in `on`, the rest in `off`. */
 static void draw_bars(int x, int y_bottom, int level, uint32_t on, uint32_t off)
 {
     for (int i = 0; i < 4; i++) {
@@ -205,6 +234,7 @@ static void draw_bars_crossed(int x, int y_bottom, uint32_t bars, uint32_t slash
     draw_line(x0, y0, x1, y1, 2.0f, slash);
 }
 
+/* Padlock icon for secured networks. */
 static void draw_lock(int x, int y, uint32_t c, uint32_t bg)
 {
     /* 10x13 padlock: shackle ring + body */
@@ -229,6 +259,10 @@ static void draw_sun(int cx, int cy, int r, uint32_t c, uint32_t bg)
     }
 }
 
+/*
+ * Top bar: title (the clock on the player screen), brightness shortcut, and the network
+ * status (name + signal icon) which opens the Wi-Fi screen.
+ */
 static void draw_header(const char *title)
 {
     gfx_fill(0, 0, SCR_W, 44, C_HEADER);
@@ -246,8 +280,10 @@ static void draw_header(const char *title)
     uint32_t label_c = C_SUB;
     switch (w->state) {
     case WS_CONNECTED:
-        if (internet_down) draw_bars_crossed(bx, by, 0x4A4A4A, C_SUB, C_HEADER);
-        else draw_bars(bx, by, signal_bars(w->signal), C_TEXT, 0x4A4A4A);
+        if (internet_down)
+            draw_bars_crossed(bx, by, 0x4A4A4A, C_SUB, C_HEADER);
+        else
+            draw_bars(bx, by, signal_bars(w->signal), C_TEXT, 0x4A4A4A);
         break;
     case WS_CONNECTING:
     case WS_DHCP:
@@ -281,13 +317,16 @@ static void draw_header(const char *title)
     int maxw = right - left_limit;
     if (label[0] && maxw > 30) {
         int tw = gfx_text_width(&font_sm, label);
-        if (tw > maxw) gfx_text_fit(&font_sm, right - maxw, 27, maxw, label, label_c);
-        else gfx_text(&font_sm, right - tw, 27, label, label_c);
+        if (tw > maxw)
+            gfx_text_fit(&font_sm, right - maxw, 27, maxw, label, label_c);
+        else
+            gfx_text(&font_sm, right - tw, 27, label, label_c);
     }
     add_hit(BTN_HEADER_WIFI, left_limit - 8, 0, SCR_W - left_limit + 8, 45);
     if (ui.screen == SCR_PLAYER) add_hit(BTN_HEADER_CLOCK, 0, 0, clock_right, 45);
 }
 
+/* Shows the current toast (UI or Spotify) as a pill at height y. */
 static void draw_toast(int y)
 {
     const char *msg = NULL;
@@ -306,8 +345,6 @@ static void draw_toast(int y)
     gfx_rrect((SCR_W - w) / 2, y, w, 30, 15, 0x3A2020);
     gfx_text_fit(&font_sm, (SCR_W - w) / 2 + 14, y + 20, w - 28, msg, 0xFFB4AE);
 }
-
-/* ---------- Wi-Fi screen ---------- */
 
 /* ---------- clock / time zone ---------- */
 
@@ -344,6 +381,7 @@ static const struct {
 };
 #define N_ZONES ((int)ARRAY_LEN(ZONES))
 
+/* Applies the selected zone to this process (localtime uses TZ). */
 static void clock_apply(void)
 {
     setenv("TZ", ui.tz[0] ? ui.tz : "UTC0", 1);
@@ -352,6 +390,7 @@ static void clock_apply(void)
 
 #define BRIGHT_MIN 5
 
+/* Sets the backlight (skips the sysfs writes if nothing changed). */
 static void brightness_apply(int pct)
 {
     static int applied = -1;
@@ -378,9 +417,12 @@ static void settings_load(void)
     }
     if (d) {
         for (char *line = strtok(d, "\n"); line; line = strtok(NULL, "\n")) {
-            if (!strncmp(line, "tz=", 3)) str_copy(ui.tz, sizeof ui.tz, line + 3);
-            else if (!strncmp(line, "clock_24h=", 10)) ui.clock_24h = atoi(line + 10);
-            else if (!strncmp(line, "brightness=", 11)) ui.brightness = atoi(line + 11);
+            if (!strncmp(line, "tz=", 3))
+                str_copy(ui.tz, sizeof ui.tz, line + 3);
+            else if (!strncmp(line, "clock_24h=", 10))
+                ui.clock_24h = atoi(line + 10);
+            else if (!strncmp(line, "brightness=", 11))
+                ui.brightness = atoi(line + 11);
         }
         free(d);
     }
@@ -402,7 +444,8 @@ static void fmt_clock(time_t t, char *out, size_t outlen)
 {
     struct tm tm;
     localtime_r(&t, &tm);
-    if (ui.clock_24h) strftime(out, outlen, "%H:%M", &tm);
+    if (ui.clock_24h)
+        strftime(out, outlen, "%H:%M", &tm);
     else {
         strftime(out, outlen, "%I:%M %p", &tm);
         if (out[0] == '0') memmove(out, out + 1, strlen(out));
@@ -417,6 +460,7 @@ static void fmt_clock_in(const char *tz, time_t t, char *out, size_t outlen)
     fmt_clock(t, out, outlen);
 }
 
+/* Index of tz in ZONES, or -1 for a custom zone from the ini. */
 static int zone_index(const char *tz)
 {
     for (int i = 0; i < N_ZONES; i++)
@@ -424,6 +468,7 @@ static int zone_index(const char *tz)
     return -1;
 }
 
+/* Opens the time zone screen scrolled to the current zone. */
 static void open_tz(void)
 {
     ui.screen = SCR_TZ;
@@ -431,6 +476,10 @@ static void open_tz(void)
     ui.list_off = cur < 0 ? 0 : cur - LIST_ROWS / 2;
 }
 
+/*
+ * Time zone picker: current time + 12/24 h toggle, then the zone list with each zone's
+ * local time so the right one is easy to spot.
+ */
 static void render_tz(void)
 {
     draw_header("Time zone");
@@ -483,8 +532,9 @@ static void render_tz(void)
 
 #define SL_X0 50
 #define SL_X1 (SCR_W - 50)
-#define SL_Y 250
+#define SL_Y  250
 
+/* Changes brightness live (saved when the finger lifts or a step button is tapped). */
 static void brightness_set(int pct)
 {
     pct = CLAMP(pct, BRIGHT_MIN, 100);
@@ -494,12 +544,14 @@ static void brightness_set(int pct)
     ui.dirty = 1;
 }
 
+/* Finger x position on the slider -> brightness. */
 static void slider_touch(int x)
 {
     int pct = BRIGHT_MIN + (x - SL_X0) * (100 - BRIGHT_MIN) / (SL_X1 - SL_X0);
     brightness_set(pct);
 }
 
+/* Brightness screen: big percentage, draggable slider, -/+ steps of 10%. */
 static void render_bright(void)
 {
     draw_header("Brightness");
@@ -529,6 +581,9 @@ static void render_bright(void)
     button(BTN_DONE, 20, 412, SCR_W - 40, 60, "Done", &font_mdb, BS_PRIMARY);
 }
 
+/* ---------- Wi-Fi screen ---------- */
+
+/* Wi-Fi screen: status card, scrollable list of networks, scroll / rescan / done buttons. */
 static void render_wifi(void)
 {
     const wifi_status *w = wifi_get();
@@ -601,7 +656,8 @@ static void render_wifi(void)
     int by = 412, bh = 60;
     button(BTN_LIST_UP, 6, by, 52, bh, NULL, &font_md, ui.list_off > 0 ? BS_NORMAL : BS_DISABLED);
     gfx_tri(32 - 10, by + 36, 32 + 10, by + 36, 32, by + 22, ui.list_off > 0 ? C_TEXT : C_DIM);
-    button(BTN_RESCAN, 64, by, 94, bh, w->scanning ? "Scanning" : "Rescan", &font_mdb, w->scanning ? BS_DISABLED : BS_NORMAL);
+    button(BTN_RESCAN, 64, by, 94, bh, w->scanning ? "Scanning" : "Rescan", &font_mdb,
+           w->scanning ? BS_DISABLED : BS_NORMAL);
     button(BTN_DONE, 164, by, 94, bh, "Done", &font_mdb, w->state == WS_CONNECTED ? BS_PRIMARY : BS_DISABLED);
     int can_down = ui.list_off + LIST_ROWS < n;
     button(BTN_LIST_DOWN, 264, by, 52, bh, NULL, &font_md, can_down ? BS_NORMAL : BS_DISABLED);
@@ -616,9 +672,10 @@ static const char *KB_ROWS[2][4] = {
     {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"},
     {"!@#$%^&*()", "-_=+[]{}\\|", ";:'\",./?`", "~<>"},
 };
-#define KB_Y 216
+#define KB_Y     216
 #define KB_KEY_H 52
 
+/* One keyboard key. */
 static void key(int id, int x, int y, int w, const char *label, const font_t *f, uint32_t bg)
 {
     int pressed = is_pressed(id);
@@ -628,6 +685,10 @@ static void key(int id, int x, int y, int w, const char *label, const font_t *f,
     add_hit(id, x, y, w, KB_KEY_H);
 }
 
+/*
+ * On-screen keyboard for the Wi-Fi password: text field (optionally masked), letters /
+ * symbols, shift (double tap = caps lock), delete, space, cancel and join.
+ */
 static void render_keyboard(void)
 {
     draw_header("Wi-Fi password");
@@ -646,7 +707,8 @@ static void render_keyboard(void)
             shown[o++] = (char)0xB7;
         }
         shown[o] = 0;
-    } else {
+    }
+    else {
         str_copy(shown, sizeof shown, ui.kb_text);
     }
     /* show the tail if it doesn't fit */
@@ -661,8 +723,11 @@ static void render_keyboard(void)
     if ((now_ms() / 500) % 2 == 0) gfx_fill(24 + tw + 1, 114, 2, 26, C_GREEN);
     button(KEY_SHOW, SCR_W - 76, 111, 60, 32, ui.kb_hide ? "Show" : "Hide", &font_sm, BS_NORMAL);
 
-    if (ui.kb_error[0]) gfx_text(&font_sm, 14, 176, ui.kb_error, C_RED);
-    else gfx_text(&font_sm, 14, 176, ui.kb_secured == 2 ? "WEP key (5/13 chars or 10/26 hex)" : "WPA password (8-63 characters)", C_DIM);
+    if (ui.kb_error[0])
+        gfx_text(&font_sm, 14, 176, ui.kb_error, C_RED);
+    else
+        gfx_text(&font_sm, 14, 176,
+                 ui.kb_secured == 2 ? "WEP key (5/13 chars or 10/26 hex)" : "WPA password (8-63 characters)", C_DIM);
     char cnt[16];
     snprintf(cnt, sizeof cnt, "%zu", len);
     gfx_text_right(&font_sm, SCR_W - 14, 176, cnt, C_DIM);
@@ -696,13 +761,17 @@ static void render_keyboard(void)
 
 /* ---------- player / Spotify screen ---------- */
 
+/* "m:ss" for a track position. */
 static void fmt_time(int ms, char *out, size_t len)
 {
     int s = ms / 1000;
-    if (s >= 3600) snprintf(out, len, "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60);
-    else snprintf(out, len, "%d:%02d", s / 60, s % 60);
+    if (s >= 3600)
+        snprintf(out, len, "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60);
+    else
+        snprintf(out, len, "%d:%02d", s / 60, s % 60);
 }
 
+/* Transport and volume icons, centred on (cx, cy). */
 static void draw_prev_icon(int cx, int cy, uint32_t c)
 {
     gfx_fill(cx - 13, cy - 12, 4, 24, c);
@@ -719,10 +788,10 @@ static void draw_next_icon(int cx, int cy, uint32_t c)
 static void draw_volume_icon(int cx, int cy, int plus, uint32_t c)
 {
     int x = cx - 17;
-    gfx_rrect(x, cy - 4, 6, 8, 1, c);                                    /* magnet box */
+    gfx_rrect(x, cy - 4, 6, 8, 1, c); /* magnet box */
     gfx_tri((float)x + 5, (float)cy - 4, (float)x + 15, (float)cy - 10, (float)x + 15, (float)cy + 10, c); /* cone */
     gfx_tri((float)x + 5, (float)cy - 4, (float)x + 15, (float)cy + 10, (float)x + 5, (float)cy + 4, c);
-    int sx = x + 21;                                                      /* sign, 13x13 */
+    int sx = x + 21; /* sign, 13x13 */
     gfx_rrect(sx, cy - 1, 13, 3, 1, c);
     if (plus) gfx_rrect(sx + 5, cy - 6, 3, 13, 1, c);
 }
@@ -748,6 +817,7 @@ static void draw_art_placeholder(int x, int y, int s)
     gfx_tri((float)cx + 6, (float)cy - 26, (float)cx + 6, (float)cy - 12, (float)cx + 22, (float)cy - 10, 0x3A3A3A);
 }
 
+/* Regenerates the QR code for the web page URL when the IP changes. */
 static void update_qr(const char *ip)
 {
     char text[64];
@@ -755,9 +825,11 @@ static void update_qr(const char *ip)
     if (!strcmp(text, ui.qr_text)) return;
     str_copy(ui.qr_text, sizeof ui.qr_text, text);
     static uint8_t tmp[qrcodegen_BUFFER_LEN_MAX];
-    ui.qr_ok = qrcodegen_encodeText(text, tmp, ui.qr, qrcodegen_Ecc_MEDIUM, qrcodegen_VERSION_MIN, 10, qrcodegen_Mask_AUTO, true);
+    ui.qr_ok = qrcodegen_encodeText(text, tmp, ui.qr, qrcodegen_Ecc_MEDIUM, qrcodegen_VERSION_MIN, 10,
+                                    qrcodegen_Mask_AUTO, true);
 }
 
+/* Draws the QR code on a white card, as large as fits in max_px. */
 static void draw_qr(int cx, int y, int max_px)
 {
     if (!ui.qr_ok) return;
@@ -770,9 +842,14 @@ static void draw_qr(int cx, int y, int max_px)
     gfx_rrect(x0 - 4, y - 4, px + 8, px + 8, 10, 0xFFFFFF);
     for (int my = 0; my < size; my++)
         for (int mx = 0; mx < size; mx++)
-            if (qrcodegen_getModule(ui.qr, mx, my)) gfx_fill(x0 + (mx + quiet) * scale, y + (my + quiet) * scale, scale, scale, 0x000000);
+            if (qrcodegen_getModule(ui.qr, mx, my))
+                gfx_fill(x0 + (mx + quiet) * scale, y + (my + quiet) * scale, scale, scale, 0x000000);
 }
 
+/*
+ * Main screen. Depending on the Spotify state it shows: waiting for Wi-Fi, missing
+ * config, the login screen (QR code + PIN), or the player itself.
+ */
 static void render_player(void)
 {
     /* header with clock */
@@ -807,14 +884,16 @@ static void render_player(void)
     if (auth == SP_WAIT_NETWORK) {
         const wifi_status *w = wifi_get();
         gfx_text_center(&font_lg, SCR_W / 2, 200, "Waiting for Wi-Fi", C_TEXT);
-        gfx_text_center(&font_sm, SCR_W / 2, 228, w->state == WS_CONNECTED ? "Starting..." : "Tap the Wi-Fi status above to set up", C_SUB);
+        gfx_text_center(&font_sm, SCR_W / 2, 228,
+                        w->state == WS_CONNECTED ? "Starting..." : "Tap the Wi-Fi status above to set up", C_SUB);
         return;
     }
     if (auth == SP_NO_CONFIG) {
         gfx_rrect(12, 70, SCR_W - 24, 220, 14, C_CARD);
         gfx_text(&font_lg, 28, 110, "Spotify not set up", C_TEXT);
         char path[300];
-        snprintf(path, sizeof path, "Add your Spotify app's client_id and client_secret to %s/thermodeck.ini, then restart.", g_dir);
+        snprintf(path, sizeof path,
+                 "Add your Spotify app's client_id and client_secret to %s/thermodeck.ini, then restart.", g_dir);
         gfx_text_wrap(&font_md, 28, 146, SCR_W - 56, 6, 22, path, C_SUB, 0, 1);
         return;
     }
@@ -834,15 +913,19 @@ static void render_player(void)
         gfx_text_wrap(&font_sm, 20, 382, SCR_W - 40, 2, 17,
                       "Enter the PIN, log in with Spotify, then paste the address you end up on.", C_SUB, 1, 1);
         gfx_text_center(&font_sm, SCR_W / 2, 424, "Console: /config/thermodeck/auth.sh", C_DIM);
-        if (auth == SP_AUTHORIZING) gfx_text_center(&font_mdb, SCR_W / 2, 458, "Authorizing...", C_YELLOW);
-        else if (msg[0]) gfx_text_wrap(&font_sm, 16, 450, SCR_W - 32, 2, 16, msg, C_RED, 1, 1);
+        if (auth == SP_AUTHORIZING)
+            gfx_text_center(&font_mdb, SCR_W / 2, 458, "Authorizing...", C_YELLOW);
+        else if (msg[0])
+            gfx_text_wrap(&font_sm, 16, 450, SCR_W - 32, 2, 16, msg, C_RED, 1, 1);
         return;
     }
 
     /* READY: now playing */
     int y = 74;
-    if (!poll_ok) gfx_text(&font_sm, 20, y, "RECONNECTING...", C_YELLOW);
-    else if (has_item) gfx_text(&font_sm, 20, y, playing ? "NOW PLAYING" : "PAUSED", playing ? C_GREEN : C_SUB);
+    if (!poll_ok)
+        gfx_text(&font_sm, 20, y, "RECONNECTING...", C_YELLOW);
+    else if (has_item)
+        gfx_text(&font_sm, 20, y, playing ? "NOW PLAYING" : "PAUSED", playing ? C_GREEN : C_SUB);
     if (device[0]) {
         char on[80];
         snprintf(on, sizeof on, "on %s", device);
@@ -856,7 +939,8 @@ static void render_player(void)
         gfx_text_wrap(&font_lg, 16, 258, SCR_W - 32, 1, 29, t, C_TEXT, 1, 1);
         gfx_text_wrap(&font_md, 16, 280, SCR_W - 32, 1, 22, artist, C_SUB, 1, 1);
         if (album[0]) gfx_text_wrap(&font_sm, 16, 298, SCR_W - 32, 1, 17, album, C_DIM, 1, 1);
-    } else {
+    }
+    else {
         draw_art_placeholder(ax, ay, ART_PX);
         gfx_text_center(&font_lg, SCR_W / 2, 262, "Nothing playing", C_TEXT);
         gfx_text_center(&font_sm, SCR_W / 2, 286, "Start Spotify on any device", C_SUB);
@@ -876,7 +960,8 @@ static void render_player(void)
         fmt_time(duration, b, sizeof b);
         gfx_text(&font_sm, bx, 331, a, C_SUB);
         gfx_text_right(&font_sm, bx + bw, 331, b, C_SUB);
-    } else {
+    }
+    else {
         gfx_text(&font_sm, bx, 331, "-:--", C_DIM);
         gfx_text_right(&font_sm, bx + bw, 331, "-:--", C_DIM);
     }
@@ -886,8 +971,10 @@ static void render_player(void)
     button(BTN_PREV, 20, cy, 88, ch, NULL, &font_md, BS_NORMAL);
     draw_prev_icon(20 + 44, cy + ch / 2, C_TEXT);
     button(BTN_PLAY, 116, cy, 88, ch, NULL, &font_md, has_item ? BS_PRIMARY : BS_DISABLED);
-    if (playing) draw_pause_icon(116 + 44, cy + ch / 2, has_item ? 0x000000 : C_DIM);
-    else draw_play_icon(116 + 44, cy + ch / 2, has_item ? 0x000000 : C_DIM);
+    if (playing)
+        draw_pause_icon(116 + 44, cy + ch / 2, has_item ? 0x000000 : C_DIM);
+    else
+        draw_play_icon(116 + 44, cy + ch / 2, has_item ? 0x000000 : C_DIM);
     button(BTN_NEXT, 212, cy, 88, ch, NULL, &font_md, BS_NORMAL);
     draw_next_icon(212 + 44, cy + ch / 2, C_TEXT);
 
@@ -903,8 +990,10 @@ static void render_player(void)
         add_hit(BTN_VOLUP, 216, 422, 84, 50);
     }
     char vl[24];
-    if (volume >= 0) snprintf(vl, sizeof vl, "%d%%", volume);
-    else str_copy(vl, sizeof vl, "--");
+    if (volume >= 0)
+        snprintf(vl, sizeof vl, "%d%%", volume);
+    else
+        str_copy(vl, sizeof vl, "--");
     gfx_text_center(&font_lg, SCR_W / 2, 452, vl, sup_vol ? C_TEXT : C_DIM);
     gfx_text_center(&font_sm, SCR_W / 2, 468, sup_vol ? "volume" : "fixed", C_DIM);
     /* volume level bar under the number */
@@ -918,6 +1007,7 @@ static void render_player(void)
 
 /* ---------- render + input ---------- */
 
+/* Repaints the current screen and pushes it to the display. */
 static void render(void)
 {
     ui.n_hits = 0;
@@ -933,6 +1023,7 @@ static void render(void)
     ui.dirty = 0;
 }
 
+/* Opens the password keyboard for a network. */
 static void open_keyboard(const char *ssid, int secured)
 {
     ui.screen = SCR_KEYBOARD;
@@ -944,6 +1035,7 @@ static void open_keyboard(const char *ssid, int secured)
     ui.kb_error[0] = 0;
 }
 
+/* Validates the password length for the security type, then starts connecting. */
 static void kb_submit(void)
 {
     size_t l = strlen(ui.kb_text);
@@ -963,6 +1055,7 @@ static void kb_submit(void)
     memset(ui.kb_text, 0, sizeof ui.kb_text);
 }
 
+/* Acts on a tap. Keys and list rows are id ranges; everything else is a single id. */
 static void on_press(int id)
 {
     const wifi_status *w = wifi_get();
@@ -997,11 +1090,14 @@ static void on_press(int id)
         int failed_here = w->state == WS_FAILED && !strcmp(w->ssid, ap.ssid);
         if (!strcmp(ap.ssid, w->ssid) && (w->state == WS_CONNECTED || w->state == WS_DHCP)) {
             ui_toast("Already connected");
-        } else if (ap.secured == 0) {
+        }
+        else if (ap.secured == 0) {
             wifi_connect(ap.ssid, NULL, 0);
-        } else if (wifi_is_saved(ap.ssid) && !failed_here) {
+        }
+        else if (wifi_is_saved(ap.ssid) && !failed_here) {
             wifi_connect_saved(ap.ssid);
-        } else {
+        }
+        else {
             open_keyboard(ap.ssid, ap.secured);
         }
         return;
@@ -1016,8 +1112,14 @@ static void on_press(int id)
         break;
     case BTN_HEADER_CLOCK: open_tz(); break;
     case BTN_HEADER_BRIGHT: ui.screen = SCR_BRIGHT; break;
-    case BTN_BRIGHT_DOWN: brightness_set(ui.brightness <= 10 ? BRIGHT_MIN : (ui.brightness - 1) / 10 * 10); settings_save(); break;
-    case BTN_BRIGHT_UP: brightness_set((ui.brightness / 10 + 1) * 10); settings_save(); break;
+    case BTN_BRIGHT_DOWN:
+        brightness_set(ui.brightness <= 10 ? BRIGHT_MIN : (ui.brightness - 1) / 10 * 10);
+        settings_save();
+        break;
+    case BTN_BRIGHT_UP:
+        brightness_set((ui.brightness / 10 + 1) * 10);
+        settings_save();
+        break;
     case BTN_TZ_24H:
         ui.clock_24h = !ui.clock_24h;
         settings_save();
@@ -1026,7 +1128,10 @@ static void on_press(int id)
     case BTN_LIST_DOWN: ui.list_off += LIST_ROWS; break;
     case BTN_RESCAN: wifi_scan(); break;
     case BTN_DONE: ui.screen = SCR_PLAYER; break;
-    case BTN_FORGET: wifi_forget(w->ssid); ui_toast("Network forgotten"); break;
+    case BTN_FORGET:
+        wifi_forget(w->ssid);
+        ui_toast("Network forgotten");
+        break;
     case BTN_PREV: spotify_command(CMD_PREV); break;
     case BTN_NEXT: spotify_command(CMD_NEXT); break;
     case BTN_PLAY: spotify_toggle_play(); break;
@@ -1035,15 +1140,22 @@ static void on_press(int id)
         pthread_mutex_lock(&g_sp.mu);
         int sv = g_sp.supports_volume;
         pthread_mutex_unlock(&g_sp.mu);
-        if (sv) spotify_volume_step(id == BTN_VOLUP ? +1 : -1);
-        else ui_toast("This device doesn't allow remote volume");
+        if (sv)
+            spotify_volume_step(id == BTN_VOLUP ? +1 : -1);
+        else
+            ui_toast("This device doesn't allow remote volume");
         break;
     }
     case KEY_SHIFT: {
         uint64_t now = now_ms();
-        if (ui.kb_caps) { ui.kb_caps = 0; ui.kb_shift = 0; }
-        else if (ui.kb_shift && now - ui.kb_last_shift < 500) ui.kb_caps = 1;
-        else ui.kb_shift = !ui.kb_shift;
+        if (ui.kb_caps) {
+            ui.kb_caps = 0;
+            ui.kb_shift = 0;
+        }
+        else if (ui.kb_shift && now - ui.kb_last_shift < 500)
+            ui.kb_caps = 1;
+        else
+            ui.kb_shift = !ui.kb_shift;
         ui.kb_last_shift = now;
         break;
     }
@@ -1055,15 +1167,25 @@ static void on_press(int id)
     }
     case KEY_SPACE: {
         size_t l = strlen(ui.kb_text);
-        if (l + 1 < sizeof ui.kb_text) { ui.kb_text[l] = ' '; ui.kb_text[l + 1] = 0; }
+        if (l + 1 < sizeof ui.kb_text) {
+            ui.kb_text[l] = ' ';
+            ui.kb_text[l + 1] = 0;
+        }
         break;
     }
-    case KEY_CANCEL: memset(ui.kb_text, 0, sizeof ui.kb_text); ui.screen = SCR_WIFI; break;
+    case KEY_CANCEL:
+        memset(ui.kb_text, 0, sizeof ui.kb_text);
+        ui.screen = SCR_WIFI;
+        break;
     case KEY_OK: kb_submit(); break;
     case KEY_SHOW: ui.kb_hide = !ui.kb_hide; break;
     }
 }
 
+/*
+ * Routes touch events: a press hits the topmost matching area; sliders follow the finger
+ * until it lifts.
+ */
 static void handle_touch(const touch_event *e)
 {
     if (e->type == TOUCH_UP) {
@@ -1098,6 +1220,7 @@ static void handle_touch(const touch_event *e)
     }
 }
 
+/* Full-screen startup message. */
 static void splash(const char *line)
 {
     gfx_clear(C_BG);
@@ -1106,6 +1229,7 @@ static void splash(const char *line)
     gfx_flush();
 }
 
+/* Startup: config, display, touch, background threads, Wi-Fi; then the UI loop. */
 int main(int argc, char **argv)
 {
     if (argc > 1) str_copy(g_dir, sizeof g_dir, argv[1]);
@@ -1158,6 +1282,7 @@ int main(int argc, char **argv)
         }
         poll(pfd, (nfds_t)nf, timeout);
 
+        /* input */
         touch_event ev[16];
         if (tfd >= 0) {
             int n = touch_read(ev, ARRAY_LEN(ev));
@@ -1174,7 +1299,8 @@ int main(int argc, char **argv)
             ui.wifi_ver = w->version;
             ui.dirty = 1;
             spotify_set_net(w->state == WS_CONNECTED, w->ip, w->ssid, w->signal);
-            if (w->state == WS_CONNECTED && ui.last_wifi_state != WS_CONNECTED && ui.screen == SCR_WIFI) ui.screen = SCR_PLAYER;
+            if (w->state == WS_CONNECTED && ui.last_wifi_state != WS_CONNECTED && ui.screen == SCR_WIFI)
+                ui.screen = SCR_PLAYER;
             ui.last_wifi_state = w->state;
         }
 
@@ -1187,6 +1313,7 @@ int main(int argc, char **argv)
             ui.sp_ver = sv;
             if (ui.screen == SCR_PLAYER) ui.dirty = 1;
         }
+        /* clock tick / progress bar: repaint once a second while playing, once a minute otherwise */
         if (ui.screen == SCR_PLAYER || ui.screen == SCR_TZ) {
             if (ui.screen == SCR_PLAYER && ticking && spotify_progress_now() / 1000 != ui.last_progress_s) ui.dirty = 1;
             time_t t = time(NULL);
@@ -1195,6 +1322,7 @@ int main(int argc, char **argv)
             if (tm.tm_min != ui.last_minute) ui.dirty = 1;
         }
         uint64_t now = now_ms();
+        /* clear the pressed highlight and expired toasts */
         if (ui.pressed_id && now >= ui.pressed_until) {
             ui.pressed_id = 0;
             ui.dirty = 1;
@@ -1211,7 +1339,8 @@ int main(int argc, char **argv)
             }
         }
         /* blinking cursor / connecting indicator */
-        if ((ui.screen == SCR_KEYBOARD || w->state == WS_CONNECTING || w->state == WS_DHCP) && now - last_blink >= 500) {
+        if ((ui.screen == SCR_KEYBOARD || w->state == WS_CONNECTING || w->state == WS_DHCP) &&
+            now - last_blink >= 500) {
             last_blink = now;
             ui.dirty = 1;
         }

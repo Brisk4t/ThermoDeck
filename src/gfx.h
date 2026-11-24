@@ -35,7 +35,8 @@ void gfx_text_right(const font_t *f, int rx, int y, const char *s, uint32_t c);
 void gfx_text_fit(const font_t *f, int x, int y, int maxw, const char *s, uint32_t c);
 /* Word-wraps into at most max_lines lines (last one ellipsized). align: 0 left, 1 center.
  * Returns number of lines drawn. If draw==0 only measures. */
-int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int line_h, const char *s, uint32_t c, int align, int draw);
+int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int line_h, const char *s, uint32_t c,
+                  int align, int draw);
 
 /* Decode one UTF-8 code point, advancing *s. */
 uint32_t utf8_next(const char **s);

@@ -1,3 +1,8 @@
+/*
+ * Minimal INI reader for thermodeck.ini: [section] headers and key = value lines.
+ * Everything is loaded once at startup into a fixed table; lookups are case-insensitive.
+ */
+
 #include "config.h"
 
 #include <ctype.h>
@@ -13,6 +18,7 @@ static struct {
 } entries[MAX_ENTRIES];
 static int n_entries;
 
+/* Strips leading/trailing whitespace in place. */
 static char *trim(char *s)
 {
     while (isspace((unsigned char)*s)) s++;
@@ -21,6 +27,7 @@ static char *trim(char *s)
     return s;
 }
 
+/* Parses the file into entries[]. Comments start with ; or #, values may be quoted. */
 int config_load(const char *path)
 {
     char *data = file_read(path, NULL);
@@ -30,12 +37,14 @@ int config_load(const char *path)
     for (char *line = strtok(data, "\n"); line; line = strtok(NULL, "\n")) {
         char *l = trim(line);
         if (!*l || *l == ';' || *l == '#') continue;
+        /* section header */
         if (*l == '[') {
             char *e = strchr(l, ']');
             if (e) *e = 0;
             str_copy(section, sizeof section, trim(l + 1));
             continue;
         }
+        /* key = value (unquote "..." or '...') */
         char *eq = strchr(l, '=');
         if (!eq || n_entries >= MAX_ENTRIES) continue;
         *eq = 0;
@@ -54,6 +63,7 @@ int config_load(const char *path)
     return 0;
 }
 
+/* Raw string value, or def if the key is missing. */
 const char *config_get(const char *section, const char *key, const char *def)
 {
     for (int i = 0; i < n_entries; i++)
@@ -61,6 +71,7 @@ const char *config_get(const char *section, const char *key, const char *def)
     return def;
 }
 
+/* Integer value; also accepts true/false, yes/no, on/off. */
 int config_int(const char *section, const char *key, int def)
 {
     const char *v = config_get(section, key, NULL);

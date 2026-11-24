@@ -17,23 +17,28 @@
 static const struct {
     const char *name, *file;
     int size;
-} FONTS[] = { /* order must match the externs in font.h */
-    {"font_sm", "DejaVuSans.ttf", 14},
-    {"font_md", "DejaVuSans.ttf", 18},
-    {"font_mdb", "DejaVuSans-Bold.ttf", 18},
-    {"font_lg", "DejaVuSans-Bold.ttf", 24},
+} FONTS[] = {
+    /* order must match the externs in font.h */
+    {"font_sm", "DejaVuSans.ttf", 14},       {"font_md", "DejaVuSans.ttf", 18},
+    {"font_mdb", "DejaVuSans-Bold.ttf", 18}, {"font_lg", "DejaVuSans-Bold.ttf", 24},
     {"font_xl", "DejaVuSans-Bold.ttf", 32},
 };
 
 static unsigned char *read_file(const char *path)
 {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); exit(1); }
+    if (!f) {
+        perror(path);
+        exit(1);
+    }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
     unsigned char *d = malloc((size_t)n);
-    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) { perror(path); exit(1); }
+    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) {
+        perror(path);
+        exit(1);
+    }
     fclose(f);
     return d;
 }
@@ -72,19 +77,34 @@ int main(int argc, char **argv)
             stbtt_GetCodepointHMetrics(&font, cp, &adv_u, &lsb);
             int adv = (int)lroundf(adv_u * scale);
             int w = 0, h = 0, xo = 0, yo = 0;
-            unsigned char *bm = (cp == 32 || cp == 160) ? NULL : stbtt_GetCodepointBitmap(&font, scale, scale, cp, &w, &h, &xo, &yo);
+            unsigned char *bm =
+                (cp == 32 || cp == 160) ? NULL : stbtt_GetCodepointBitmap(&font, scale, scale, cp, &w, &h, &xo, &yo);
             /* crop empty rows/columns */
             int top = 0, bot = h, left = w, right = 0;
-            while (top < bot) { int any = 0; for (int x = 0; x < w; x++) any |= bm[top * w + x]; if (any) break; top++; }
-            while (bot > top) { int any = 0; for (int x = 0; x < w; x++) any |= bm[(bot - 1) * w + x]; if (any) break; bot--; }
+            while (top < bot) {
+                int any = 0;
+                for (int x = 0; x < w; x++) any |= bm[top * w + x];
+                if (any) break;
+                top++;
+            }
+            while (bot > top) {
+                int any = 0;
+                for (int x = 0; x < w; x++) any |= bm[(bot - 1) * w + x];
+                if (any) break;
+                bot--;
+            }
             for (int y = top; y < bot; y++)
                 for (int x = 0; x < w; x++)
-                    if (bm[y * w + x]) { if (x < left) left = x; if (x + 1 > right) right = x + 1; }
+                    if (bm[y * w + x]) {
+                        if (x < left) left = x;
+                        if (x + 1 > right) right = x + 1;
+                    }
             if (top >= bot || right <= left) {
                 glyphs[i][0] = glyphs[i][1] = glyphs[i][2] = glyphs[i][3] = 0;
                 glyphs[i][4] = adv;
                 glyphs[i][5] = (int)len;
-            } else {
+            }
+            else {
                 int gw = right - left, gh = bot - top;
                 if (len + (size_t)(gw * gh) > cap) bits = realloc(bits, cap *= 2);
                 glyphs[i][0] = gw;
@@ -111,7 +131,8 @@ int main(int argc, char **argv)
         printf("};\n");
         printf("static const glyph_t %s_glyphs[191] = {\n", n);
         for (int i = 0; i < 191; i++)
-            printf("  {%d,%d,%d,%d,%d,%d},\n", glyphs[i][0], glyphs[i][1], glyphs[i][2], glyphs[i][3], glyphs[i][4], glyphs[i][5]);
+            printf("  {%d,%d,%d,%d,%d,%d},\n", glyphs[i][0], glyphs[i][1], glyphs[i][2], glyphs[i][3], glyphs[i][4],
+                   glyphs[i][5]);
         printf("};\n");
         printf("const font_t %s = { %d, %d, %d, %d, %s_glyphs, %s_bits };\n\n", n, FONTS[fi].size, ascent, descent,
                ascent + descent, n, n);

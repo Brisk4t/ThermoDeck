@@ -1,3 +1,9 @@
+/*
+ * Software rendering into a 320x480 back buffer (0xRRGGBB per pixel) that gfx_flush()
+ * copies to the Linux framebuffer. Shapes and text are anti-aliased by computing how much
+ * of each pixel a shape covers and blending by that amount.
+ */
+
 #include "gfx.h"
 
 #include <fcntl.h>
@@ -12,6 +18,7 @@
 
 #include "common.h"
 
+/* everything draws here; the framebuffer is only touched by gfx_flush() */
 static uint32_t backbuf[SCR_W * SCR_H];
 static int fb_fd = -1;
 static uint8_t *fb_mem;
@@ -19,12 +26,16 @@ static size_t fb_len;
 static int fb_line, fb_bpp, fb_xres, fb_yres;
 static int r_off = 16, g_off = 8, b_off = 0, native_xrgb = 1;
 
+/* Opens and maps the framebuffer and records its pixel layout. */
 int gfx_init(const char *fbdev)
 {
     struct fb_var_screeninfo v;
     struct fb_fix_screeninfo f;
     fb_fd = open(fbdev, O_RDWR);
-    if (fb_fd < 0) { tdlog("gfx: open %s failed", fbdev); return -1; }
+    if (fb_fd < 0) {
+        tdlog("gfx: open %s failed", fbdev);
+        return -1;
+    }
     if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &v) || ioctl(fb_fd, FBIOGET_FSCREENINFO, &f)) {
         tdlog("gfx: ioctl failed");
         return -1;
@@ -39,7 +50,11 @@ int gfx_init(const char *fbdev)
     native_xrgb = fb_bpp == 32 && r_off == 16 && g_off == 8 && b_off == 0;
     fb_len = f.smem_len ? f.smem_len : (size_t)fb_line * v.yres_virtual;
     fb_mem = mmap(NULL, fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
-    if (fb_mem == MAP_FAILED) { tdlog("gfx: mmap failed"); fb_mem = NULL; return -1; }
+    if (fb_mem == MAP_FAILED) {
+        tdlog("gfx: mmap failed");
+        fb_mem = NULL;
+        return -1;
+    }
     /* Make sure we're showing the first page and the panel is unblanked. */
     if (v.yoffset || v.xoffset) {
         v.xoffset = v.yoffset = 0;
@@ -50,12 +65,14 @@ int gfx_init(const char *fbdev)
     return 0;
 }
 
+/* Unmaps and closes the framebuffer. */
 void gfx_close(void)
 {
     if (fb_mem) munmap(fb_mem, fb_len);
     if (fb_fd >= 0) close(fb_fd);
 }
 
+/* Small sysfs helpers. */
 static int read_int_file(const char *path, int def)
 {
     FILE *f = fopen(path, "r");
@@ -100,6 +117,10 @@ void gfx_set_backlight(int percent)
     write_int_file(path, 0);
 }
 
+/*
+ * Copies the back buffer to the screen, converting the pixel format if the framebuffer
+ * isn't 32-bit XRGB (the ecobee's is, so it's a straight memcpy per row).
+ */
 void gfx_flush(void)
 {
     if (!fb_mem) return;
@@ -110,13 +131,15 @@ void gfx_flush(void)
         uint8_t *dst = fb_mem + (size_t)y * (size_t)fb_line;
         if (native_xrgb) {
             memcpy(dst, src, (size_t)w * 4);
-        } else if (fb_bpp == 32) {
+        }
+        else if (fb_bpp == 32) {
             uint32_t *d = (uint32_t *)dst;
             for (int x = 0; x < w; x++) {
                 uint32_t c = src[x];
                 d[x] = (((c >> 16) & 255) << r_off) | (((c >> 8) & 255) << g_off) | ((c & 255) << b_off);
             }
-        } else if (fb_bpp == 16) {
+        }
+        else if (fb_bpp == 16) {
             uint16_t *d = (uint16_t *)dst;
             for (int x = 0; x < w; x++) {
                 uint32_t c = src[x];
@@ -126,15 +149,23 @@ void gfx_flush(void)
     }
 }
 
+/* Fills the whole back buffer. */
 void gfx_clear(uint32_t c)
 {
     for (int i = 0; i < SCR_W * SCR_H; i++) backbuf[i] = c;
 }
 
+/* Solid rectangle, clipped to the screen. */
 void gfx_fill(int x, int y, int w, int h, uint32_t c)
 {
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
     if (x + w > SCR_W) w = SCR_W - x;
     if (y + h > SCR_H) h = SCR_H - y;
     if (w <= 0 || h <= 0) return;
@@ -144,6 +175,7 @@ void gfx_fill(int x, int y, int w, int h, uint32_t c)
     }
 }
 
+/* Mixes source colour s over d with alpha a (0..255), per channel. */
 static inline uint32_t blend(uint32_t d, uint32_t s, int a)
 {
     if (a >= 255) return s;
@@ -155,6 +187,7 @@ static inline uint32_t blend(uint32_t d, uint32_t s, int a)
     return rb | g;
 }
 
+/* Blends one pixel (ignored if off screen). */
 void gfx_blend_px(int x, int y, uint32_t c, int a)
 {
     if ((unsigned)x >= SCR_W || (unsigned)y >= SCR_H) return;
@@ -173,11 +206,15 @@ static inline int disc_cov(float px, float py, float cx, float cy, float r)
     return (int)(cov * 255);
 }
 
+/* Rounded rectangle: three solid rectangles plus four anti-aliased quarter-disc corners. */
 void gfx_rrect(int x, int y, int w, int h, int r, uint32_t c)
 {
     if (r * 2 > w) r = w / 2;
     if (r * 2 > h) r = h / 2;
-    if (r <= 0) { gfx_fill(x, y, w, h, c); return; }
+    if (r <= 0) {
+        gfx_fill(x, y, w, h, c);
+        return;
+    }
     gfx_fill(x, y + r, w, h - 2 * r, c);
     gfx_fill(x + r, y, w - 2 * r, r, c);
     gfx_fill(x + r, y + h - r, w - 2 * r, r, c);
@@ -195,17 +232,17 @@ void gfx_rrect(int x, int y, int w, int h, int r, uint32_t c)
     }
 }
 
+/* Rounded rectangle border: outer shape in c, then the inside refilled with inner. */
 void gfx_rrect_outline(int x, int y, int w, int h, int r, int thick, uint32_t c, uint32_t inner)
 {
     gfx_rrect(x, y, w, h, r, c);
     gfx_rrect(x + thick, y + thick, w - 2 * thick, h - 2 * thick, r > thick ? r - thick : 0, inner);
 }
 
-void gfx_circle(int cx, int cy, int r, uint32_t c)
-{
-    gfx_ring(cx, cy, r, -1, c);
-}
+/* Filled anti-aliased circle. */
+void gfx_circle(int cx, int cy, int r, uint32_t c) { gfx_ring(cx, cy, r, -1, c); }
 
+/* Anti-aliased annulus; r_in < 0 means a filled disc. */
 void gfx_ring(int cx, int cy, int r_out, int r_in, uint32_t c)
 {
     float fcx = (float)cx + 0.5f, fcy = (float)cy + 0.5f;
@@ -224,13 +261,20 @@ void gfx_ring(int cx, int cy, int r_out, int r_in, uint32_t c)
     }
 }
 
+/*
+ * Anti-aliased filled triangle: for each pixel in the bounding box, the distance to the
+ * nearest edge gives its coverage.
+ */
 void gfx_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t c)
 {
     /* normalize winding so that inside points get positive edge distances (y axis points down) */
     float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     if (area > 0) {
         float tx = x1, ty = y1;
-        x1 = x2; y1 = y2; x2 = tx; y2 = ty;
+        x1 = x2;
+        y1 = y2;
+        x2 = tx;
+        y2 = ty;
     }
     float ex[3][3]; /* a, b, c with distance = a*x + b*y + c (normalized) */
     float vx[3] = {x0, x1, x2}, vy[3] = {y0, y1, y2};
@@ -239,11 +283,15 @@ void gfx_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_
         float nx = -(by - ay), ny = bx - ax;
         float len = sqrtf(nx * nx + ny * ny);
         if (len == 0) return;
-        nx /= len; ny /= len;
-        ex[k][0] = nx; ex[k][1] = ny; ex[k][2] = -(nx * ax + ny * ay);
+        nx /= len;
+        ny /= len;
+        ex[k][0] = nx;
+        ex[k][1] = ny;
+        ex[k][2] = -(nx * ax + ny * ay);
     }
     int minx = (int)floorf(fminf(x0, fminf(x1, x2))) - 1, maxx = (int)ceilf(fmaxf(x0, fmaxf(x1, x2))) + 1;
     int miny = (int)floorf(fminf(y0, fminf(y1, y2))) - 1, maxy = (int)ceilf(fmaxf(y0, fmaxf(y1, y2))) + 1;
+    /* coverage = signed distance to the closest edge, shifted by half a pixel */
     for (int y = miny; y <= maxy; y++) {
         for (int x = minx; x <= maxx; x++) {
             float px = (float)x + 0.5f, py = (float)y + 0.5f;
@@ -259,27 +307,41 @@ void gfx_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_
     }
 }
 
+/* Decodes one UTF-8 code point and advances *sp (bad bytes come back as '?'). */
 uint32_t utf8_next(const char **sp)
 {
     const unsigned char *s = (const unsigned char *)*sp;
     uint32_t cp;
     int n;
-    if (s[0] < 0x80) { cp = s[0]; n = 1; }
-    else if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) { cp = ((uint32_t)(s[0] & 0x1F) << 6) | (s[1] & 0x3F); n = 2; }
+    if (s[0] < 0x80) {
+        cp = s[0];
+        n = 1;
+    }
+    else if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        cp = ((uint32_t)(s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+        n = 2;
+    }
     else if ((s[0] & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
-        cp = ((uint32_t)(s[0] & 0x0F) << 12) | ((uint32_t)(s[1] & 0x3F) << 6) | (s[2] & 0x3F); n = 3;
-    } else if ((s[0] & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
-        cp = ((uint32_t)(s[0] & 0x07) << 18) | ((uint32_t)(s[1] & 0x3F) << 12) | ((uint32_t)(s[2] & 0x3F) << 6) | (s[3] & 0x3F); n = 4;
-    } else { cp = '?'; n = 1; }
+        cp = ((uint32_t)(s[0] & 0x0F) << 12) | ((uint32_t)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+        n = 3;
+    }
+    else if ((s[0] & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+        cp = ((uint32_t)(s[0] & 0x07) << 18) | ((uint32_t)(s[1] & 0x3F) << 12) | ((uint32_t)(s[2] & 0x3F) << 6) |
+             (s[3] & 0x3F);
+        n = 4;
+    }
+    else {
+        cp = '?';
+        n = 1;
+    }
     *sp += n;
     return cp;
 }
 
-static int glyph_adv(const font_t *f, uint32_t cp)
-{
-    return f->glyphs[font_index(cp)].adv;
-}
+/* Horizontal advance of a character in font f. */
+static int glyph_adv(const font_t *f, uint32_t cp) { return f->glyphs[font_index(cp)].adv; }
 
+/* Width in pixels of s when drawn in font f. */
 int gfx_text_width(const font_t *f, const char *s)
 {
     int w = 0;
@@ -287,6 +349,7 @@ int gfx_text_width(const font_t *f, const char *s)
     return w;
 }
 
+/* Blends one glyph's alpha bitmap at baseline (x, y); returns its advance. */
 static int draw_glyph(const font_t *f, int x, int y, uint32_t cp, uint32_t c)
 {
     const glyph_t *g = &f->glyphs[font_index(cp)];
@@ -307,6 +370,7 @@ static int draw_glyph(const font_t *f, int x, int y, uint32_t cp, uint32_t c)
     return g->adv;
 }
 
+/* Left-aligned text with its baseline at y; returns the width drawn. */
 int gfx_text(const font_t *f, int x, int y, const char *s, uint32_t c)
 {
     int x0 = x;
@@ -324,9 +388,13 @@ void gfx_text_right(const font_t *f, int rx, int y, const char *s, uint32_t c)
     gfx_text(f, rx - gfx_text_width(f, s), y, s, c);
 }
 
+/* Draws as many characters as fit in maxw followed by "...". */
 void gfx_text_fit(const font_t *f, int x, int y, int maxw, const char *s, uint32_t c)
 {
-    if (gfx_text_width(f, s) <= maxw) { gfx_text(f, x, y, s, c); return; }
+    if (gfx_text_width(f, s) <= maxw) {
+        gfx_text(f, x, y, s, c);
+        return;
+    }
     int dots = 3 * glyph_adv(f, '.');
     int w = 0;
     const char *p = s;
@@ -340,7 +408,9 @@ void gfx_text_fit(const font_t *f, int x, int y, int maxw, const char *s, uint32
     for (int i = 0; i < 3; i++) x += draw_glyph(f, x, y, '.', c);
 }
 
-int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int line_h, const char *s, uint32_t c, int align, int draw)
+/* Word-wraps s into at most max_lines lines of width maxw (see gfx.h). */
+int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int line_h, const char *s, uint32_t c,
+                  int align, int draw)
 {
     char line[512];
     int lines = 0;
@@ -361,15 +431,19 @@ int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int li
             if (*q == ' ' || !*q) last_break = q;
         }
         const char *end;
-        if (!*q) end = q;                    /* rest fits */
-        else if (last_break) end = last_break; /* break at word */
-        else end = q > p ? q : p + 1;        /* single long word: hard break */
+        if (!*q)
+            end = q; /* rest fits */
+        else if (last_break)
+            end = last_break; /* break at word */
+        else
+            end = q > p ? q : p + 1; /* single long word: hard break */
         int is_last = lines == max_lines - 1;
         size_t len;
         if (is_last && *end) {
             /* last allowed line but text remains: take the rest and ellipsize */
             len = strlen(p);
-        } else {
+        }
+        else {
             len = (size_t)(end - p);
         }
         if (len >= sizeof line) len = sizeof line - 1;
@@ -387,6 +461,10 @@ int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int li
     return lines;
 }
 
+/*
+ * Copies an image into the back buffer; pixels in the rounded corners are blended by
+ * their coverage so the corners come out anti-aliased.
+ */
 void gfx_blit(int x, int y, int w, int h, const uint32_t *px, int r)
 {
     if (r * 2 > w) r = w / 2;
@@ -421,7 +499,8 @@ int gfx_dump_ppm(const char *path)
     if (!f) return -1;
     fprintf(f, "P6\n%d %d\n255\n", SCR_W, SCR_H);
     for (int i = 0; i < SCR_W * SCR_H; i++) {
-        unsigned char p[3] = {(unsigned char)(backbuf[i] >> 16), (unsigned char)(backbuf[i] >> 8), (unsigned char)backbuf[i]};
+        unsigned char p[3] = {(unsigned char)(backbuf[i] >> 16), (unsigned char)(backbuf[i] >> 8),
+                              (unsigned char)backbuf[i]};
         fwrite(p, 1, 3, f);
     }
     fclose(f);
