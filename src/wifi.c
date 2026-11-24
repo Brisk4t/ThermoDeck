@@ -37,6 +37,9 @@ static int dhcp_started;
 static struct { int active; char ssid[33]; char psk[65]; int secured; } pending; /* saved once connected */
 static int scan_results_tries;
 static int last_was_completed;
+/* Wrong-key detection: the 4-way handshake starting and then falling back to scanning. */
+static char last_wpa_state[32];
+static int handshake_fails;
 
 /* ---------- wpa_supplicant control interface ---------- */
 
@@ -371,6 +374,7 @@ int wifi_init(void)
         st.state = WS_CONNECTING;
         str_copy(st.ssid, sizeof st.ssid, saved[0].ssid);
         connect_started_ms = now_ms();
+        handshake_fails = 0;
     }
     wifi_scan();
     bump();
@@ -478,7 +482,9 @@ void wifi_connect(const char *ssid, const char *psk, int secured)
     str_copy(st.ssid, sizeof st.ssid, ssid);
     st.ip[0] = 0;
     st.message[0] = 0;
+    st.auth_failed = 0;
     connect_started_ms = now_ms();
+    handshake_fails = 0;
     dhcp_started = 0;
     last_was_completed = 0;
     /* remember the credentials once the connection actually works (see wifi_poll) */
@@ -536,6 +542,14 @@ void wifi_poll(void)
         else if (!strncmp(line, "ssid=", 5)) ssid_decode(line + 5, ssid, sizeof ssid);
     }
     int completed = !strcmp(wpa_state, "COMPLETED");
+    int in_handshake = !strcmp(wpa_state, "4WAY_HANDSHAKE") || !strcmp(wpa_state, "GROUP_HANDSHAKE");
+    int was_handshake = !strcmp(last_wpa_state, "4WAY_HANDSHAKE") || !strcmp(last_wpa_state, "GROUP_HANDSHAKE");
+    if (was_handshake && !in_handshake && !completed) {
+        handshake_fails++;
+        tdlog("wifi: handshake failed (%d), now %s", handshake_fails, wpa_state);
+    }
+    if (completed) handshake_fails = 0;
+    str_copy(last_wpa_state, sizeof last_wpa_state, wpa_state);
     char ip[16];
     get_ip(ip, sizeof ip);
 
@@ -569,10 +583,10 @@ void wifi_poll(void)
         if (st.state == WS_CONNECTED || st.state == WS_DHCP) {
             ns = WS_CONNECTING;
             connect_started_ms = now;
-        } else if (st.state == WS_CONNECTING && now - connect_started_ms > 30000) {
+        } else if (st.state == WS_CONNECTING && (handshake_fails >= 2 || now - connect_started_ms > 30000)) {
             ns = WS_FAILED;
-            str_copy(st.message, sizeof st.message,
-                     !strcmp(wpa_state, "4WAY_HANDSHAKE") || !strcmp(wpa_state, "ASSOCIATED") ? "Wrong password?" : "Network not reachable");
+            st.auth_failed = handshake_fails >= 1 || in_handshake || !strcmp(wpa_state, "ASSOCIATED");
+            str_copy(st.message, sizeof st.message, st.auth_failed ? "Wrong password" : "Network not reachable");
         } else if (st.state == WS_IDLE && strcmp(wpa_state, "DISCONNECTED") && strcmp(wpa_state, "INACTIVE") && strcmp(wpa_state, "SCANNING") && wpa_state[0]) {
             ns = WS_CONNECTING;
             connect_started_ms = now;
@@ -583,7 +597,10 @@ void wifi_poll(void)
     if (ns != st.state || strcmp(ip, st.ip)) {
         st.state = ns;
         str_copy(st.ip, sizeof st.ip, ip);
-        if (ns == WS_CONNECTED) st.message[0] = 0;
+        if (ns == WS_CONNECTED) {
+            st.message[0] = 0;
+            st.auth_failed = 0;
+        }
         bump();
     }
     /* signal of the current AP from the scan list */

@@ -23,6 +23,7 @@ typedef struct {
     char ssid[33];     /* network being connected / connected */
     char ip[16];
     char message[96];  /* failure reason */
+    int auth_failed;   /* WS_FAILED because the password/key was rejected */
     int signal;        /* dBm of current AP, 0 unknown */
     wifi_ap aps[WIFI_MAX_AP];
     int n_aps;

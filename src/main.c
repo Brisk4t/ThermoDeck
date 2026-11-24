@@ -4,6 +4,7 @@
  * (spotify.c: NTP, OAuth, polling, commands), web server (web.c: OAuth from another device).
  */
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -38,11 +39,13 @@
 #define C_YELLOW 0xE0B341
 
 /* ---------- UI state ---------- */
-enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER };
+enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER, SCR_TZ };
 
 enum {
     BTN_NONE = 0,
     BTN_HEADER_WIFI,
+    BTN_HEADER_CLOCK,
+    BTN_TZ_24H,
     BTN_LIST_UP,
     BTN_LIST_DOWN,
     BTN_RESCAN,
@@ -104,6 +107,10 @@ static struct {
     uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
     int qr_ok;
     int web_port;
+
+    /* clock settings (clock.conf overrides thermodeck.ini) */
+    char tz[64];
+    int clock_24h;
 } ui;
 
 static int wake_pipe[2] = {-1, -1};
@@ -163,12 +170,33 @@ static int signal_bars(int dbm)
     return 1;
 }
 
+#define BARS_W 18 /* 4 bars of 3px with 2px gaps */
+
 static void draw_bars(int x, int y_bottom, int level, uint32_t on, uint32_t off)
 {
     for (int i = 0; i < 4; i++) {
         int h = 4 + i * 3;
         gfx_fill(x + i * 5, y_bottom - h, 3, h, i < level ? on : off);
     }
+}
+
+/* Anti-aliased thick line as a quad (two triangles). */
+static void draw_line(float x0, float y0, float x1, float y1, float w, uint32_t c)
+{
+    float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx * dx + dy * dy);
+    if (len <= 0) return;
+    float nx = -dy / len * w / 2, ny = dx / len * w / 2;
+    gfx_tri(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, c);
+    gfx_tri(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
+}
+
+/* Signal bars with a slash through them: no connectivity. */
+static void draw_bars_crossed(int x, int y_bottom, uint32_t bars, uint32_t slash, uint32_t bg)
+{
+    draw_bars(x, y_bottom, 4, bars, bars);
+    float x0 = (float)x - 1, y0 = (float)y_bottom - 15, x1 = (float)x + BARS_W + 1, y1 = (float)y_bottom + 1;
+    draw_line(x0, y0, x1, y1, 5.0f, bg); /* gap around the slash so it reads over the bars */
+    draw_line(x0, y0, x1, y1, 2.0f, slash);
 }
 
 static void draw_lock(int x, int y, uint32_t c, uint32_t bg)
@@ -187,16 +215,49 @@ static void draw_header(const char *title)
     gfx_fill(0, 44, SCR_W, 1, C_LINE);
     gfx_text(&font_mdb, 14, 29, title, C_TEXT);
 
+    /* Network status, right-aligned: "<label> <bars>". */
     const wifi_status *w = wifi_get();
-    uint32_t dot = w->state == WS_CONNECTED ? C_GREEN : (w->state == WS_CONNECTING || w->state == WS_DHCP) ? C_YELLOW : C_RED;
-    int level = w->state == WS_CONNECTED ? signal_bars(w->signal) : 0;
-    /* blink the dot while connecting */
-    if ((w->state == WS_CONNECTING || w->state == WS_DHCP) && (now_ms() / 500) % 2) dot = 0x6B5A22;
-    draw_bars(SCR_W - 34, 30, level, C_TEXT, 0x4A4A4A);
-    gfx_circle(SCR_W - 46, 22, 5, dot);
-    if (w->state == WS_CONNECTED && w->ssid[0]) gfx_text_fit(&font_sm, SCR_W - 160, 27, 104, w->ssid, C_SUB);
-    else if (w->state != WS_CONNECTED) gfx_text_right(&font_sm, SCR_W - 58, 27, w->state == WS_FAILED || w->state == WS_IDLE ? "Offline" : "Connecting", C_SUB);
-    add_hit(BTN_HEADER_WIFI, SCR_W - 170, 0, 170, 45);
+    pthread_mutex_lock(&g_sp.mu);
+    int internet_down = w->state == WS_CONNECTED && g_sp.auth == SP_READY && !g_sp.last_poll_ok;
+    pthread_mutex_unlock(&g_sp.mu);
+
+    const int bx = SCR_W - 14 - BARS_W, by = 30;
+    const char *label = w->ssid;
+    uint32_t label_c = C_SUB;
+    switch (w->state) {
+    case WS_CONNECTED:
+        if (internet_down) draw_bars_crossed(bx, by, 0x4A4A4A, C_SUB, C_HEADER);
+        else draw_bars(bx, by, signal_bars(w->signal), C_TEXT, 0x4A4A4A);
+        break;
+    case WS_CONNECTING:
+    case WS_DHCP:
+        /* sweeping bars while joining */
+        draw_bars(bx, by, 1 + (int)((now_ms() / 500) % 4), C_SUB, 0x4A4A4A);
+        label = "Connecting";
+        break;
+    case WS_FAILED:
+        if (w->auth_failed) {
+            draw_bars(bx, by, 4, C_RED, C_RED);
+            label = "Wrong password";
+            label_c = C_RED;
+            break;
+        }
+        /* fall through */
+    default:
+        draw_bars_crossed(bx, by, 0x4A4A4A, C_SUB, C_HEADER);
+        label = w->state == WS_IDLE ? "No Wi-Fi" : "Offline";
+        break;
+    }
+    int right = bx - 8;
+    int left_limit = 14 + gfx_text_width(&font_mdb, title) + 16;
+    int maxw = right - left_limit;
+    if (label[0] && maxw > 30) {
+        int tw = gfx_text_width(&font_sm, label);
+        if (tw > maxw) gfx_text_fit(&font_sm, right - maxw, 27, maxw, label, label_c);
+        else gfx_text(&font_sm, right - tw, 27, label, label_c);
+    }
+    add_hit(BTN_HEADER_WIFI, left_limit - 8, 0, SCR_W - left_limit + 8, 45);
+    if (ui.screen == SCR_PLAYER) add_hit(BTN_HEADER_CLOCK, 0, 0, left_limit - 8, 45);
 }
 
 static void draw_toast(int y)
@@ -219,6 +280,155 @@ static void draw_toast(int y)
 }
 
 /* ---------- Wi-Fi screen ---------- */
+
+/* ---------- clock / time zone ---------- */
+
+/* POSIX TZ strings (no zoneinfo needed). Ordered west to east. */
+static const struct {
+    const char *name, *places, *tz;
+} ZONES[] = {
+    {"Hawaii", "Honolulu", "HST10"},
+    {"Alaska", "Anchorage", "AKST9AKDT,M3.2.0,M11.1.0"},
+    {"Pacific", "Vancouver, Los Angeles", "PST8PDT,M3.2.0,M11.1.0"},
+    {"Mountain", "Edmonton, Calgary, Denver", "MST7MDT,M3.2.0,M11.1.0"},
+    {"Mountain (no DST)", "Arizona", "MST7"},
+    {"Central", "Winnipeg, Chicago, Mexico City", "CST6CDT,M3.2.0,M11.1.0"},
+    {"Central (no DST)", "Saskatchewan", "CST6"},
+    {"Eastern", "Toronto, Montreal, New York", "EST5EDT,M3.2.0,M11.1.0"},
+    {"Atlantic", "Halifax", "AST4ADT,M3.2.0,M11.1.0"},
+    {"Newfoundland", "St. John's", "NST3:30NDT,M3.2.0,M11.1.0"},
+    {"Brazil / Argentina", "Sao Paulo, Buenos Aires", "<-03>3"},
+    {"UTC", "Coordinated Universal Time", "UTC0"},
+    {"UK / Ireland", "London, Dublin, Lisbon", "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"Central Europe", "Paris, Berlin, Madrid, Rome", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Eastern Europe", "Athens, Helsinki, Kyiv", "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"Moscow / Istanbul", "Moscow, Istanbul, Riyadh", "<+03>-3"},
+    {"Gulf", "Dubai, Abu Dhabi", "<+04>-4"},
+    {"Pakistan", "Karachi, Tashkent", "<+05>-5"},
+    {"India", "Delhi, Mumbai, Colombo", "IST-5:30"},
+    {"Bangladesh", "Dhaka", "<+06>-6"},
+    {"Indochina", "Bangkok, Jakarta, Hanoi", "<+07>-7"},
+    {"China / Singapore", "Beijing, Singapore, Perth", "<+08>-8"},
+    {"Japan / Korea", "Tokyo, Seoul", "JST-9"},
+    {"Australia East", "Sydney, Melbourne", "AEST-10AEDT,M10.1.0,M4.1.0/3"},
+    {"Queensland", "Brisbane", "AEST-10"},
+    {"New Zealand", "Auckland", "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+};
+#define N_ZONES ((int)ARRAY_LEN(ZONES))
+
+static void clock_apply(void)
+{
+    setenv("TZ", ui.tz[0] ? ui.tz : "UTC0", 1);
+    tzset();
+}
+
+static void clock_load(void)
+{
+    str_copy(ui.tz, sizeof ui.tz, config_get("display", "timezone", "UTC0"));
+    ui.clock_24h = config_int("display", "clock_24h", 0);
+    char p[300];
+    path_join(p, sizeof p, "clock.conf");
+    char *d = file_read(p, NULL);
+    if (d) {
+        for (char *line = strtok(d, "\n"); line; line = strtok(NULL, "\n")) {
+            if (!strncmp(line, "tz=", 3)) str_copy(ui.tz, sizeof ui.tz, line + 3);
+            else if (!strncmp(line, "clock_24h=", 10)) ui.clock_24h = atoi(line + 10);
+        }
+        free(d);
+    }
+    clock_apply();
+    tdlog("clock: TZ=%s, %d-hour", ui.tz, ui.clock_24h ? 24 : 12);
+}
+
+static void clock_save(void)
+{
+    char p[300], buf[128];
+    path_join(p, sizeof p, "clock.conf");
+    int n = snprintf(buf, sizeof buf, "tz=%s\nclock_24h=%d\n", ui.tz, ui.clock_24h);
+    if (file_write_atomic(p, buf, (size_t)n, 0644) < 0) tdlog("clock: could not save %s", p);
+}
+
+/* "6:45 AM" / "06:45" for time t in the current TZ. */
+static void fmt_clock(time_t t, char *out, size_t outlen)
+{
+    struct tm tm;
+    localtime_r(&t, &tm);
+    if (ui.clock_24h) strftime(out, outlen, "%H:%M", &tm);
+    else {
+        strftime(out, outlen, "%I:%M %p", &tm);
+        if (out[0] == '0') memmove(out, out + 1, strlen(out));
+    }
+}
+
+/* Same, but in another zone (briefly switches TZ; only the UI thread uses local time). */
+static void fmt_clock_in(const char *tz, time_t t, char *out, size_t outlen)
+{
+    setenv("TZ", tz, 1);
+    tzset();
+    fmt_clock(t, out, outlen);
+}
+
+static int zone_index(const char *tz)
+{
+    for (int i = 0; i < N_ZONES; i++)
+        if (!strcmp(ZONES[i].tz, tz)) return i;
+    return -1;
+}
+
+static void open_tz(void)
+{
+    ui.screen = SCR_TZ;
+    int cur = zone_index(ui.tz);
+    ui.list_off = cur < 0 ? 0 : cur - LIST_ROWS / 2;
+}
+
+static void render_tz(void)
+{
+    draw_header("Time zone");
+    time_t now = time(NULL);
+    int cur = zone_index(ui.tz);
+    struct tm now_tm;
+    localtime_r(&now, &now_tm);
+    ui.last_minute = now_tm.tm_min;
+
+    /* current setting */
+    char t[16];
+    fmt_clock(now, t, sizeof t);
+    gfx_rrect(8, 52, SCR_W - 16, 60, 12, C_CARD);
+    gfx_text(&font_lg, 22, 81, t, C_TEXT);
+    gfx_text_fit(&font_sm, 22, 101, SCR_W - 104 - 8 - 22, cur >= 0 ? ZONES[cur].name : ui.tz, C_SUB);
+    button(BTN_TZ_24H, SCR_W - 104, 62, 88, 40, ui.clock_24h ? "24-hour" : "12-hour", &font_mdb, BS_NORMAL);
+
+    /* zones, each with its local time right now */
+    int n = N_ZONES;
+    if (ui.list_off > n - LIST_ROWS) ui.list_off = n - LIST_ROWS;
+    if (ui.list_off < 0) ui.list_off = 0;
+    for (int r = 0; r < LIST_ROWS && ui.list_off + r < n; r++) {
+        int i = ui.list_off + r;
+        int y = LIST_Y + r * LIST_ROW_H;
+        int sel = i == cur;
+        if (is_pressed(BTN_ROW0 + r)) gfx_fill(0, y, SCR_W, LIST_ROW_H, 0x262626);
+        gfx_fill(16, y + LIST_ROW_H - 1, SCR_W - 32, 1, C_LINE);
+        fmt_clock_in(ZONES[i].tz, now, t, sizeof t);
+        int tw = gfx_text_width(&font_mdb, t);
+        gfx_text_right(&font_mdb, SCR_W - 18, y + 35, t, sel ? C_GREEN : C_SUB);
+        int maxw = SCR_W - 18 - tw - 12 - 18;
+        gfx_text_fit(&font_md, 18, y + 27, maxw, ZONES[i].name, sel ? C_GREEN : C_TEXT);
+        gfx_text_fit(&font_sm, 18, y + 46, maxw, ZONES[i].places, C_DIM);
+        add_hit(BTN_ROW0 + r, 0, y, SCR_W, LIST_ROW_H);
+    }
+    clock_apply(); /* back to the selected zone */
+    int track = LIST_ROWS * LIST_ROW_H;
+    gfx_rrect(SCR_W - 6, LIST_Y + track * ui.list_off / n, 3, track * LIST_ROWS / n, 1, 0x555555);
+
+    int by = 412, bh = 60;
+    button(BTN_LIST_UP, 6, by, 72, bh, NULL, &font_md, ui.list_off > 0 ? BS_NORMAL : BS_DISABLED);
+    gfx_tri(42 - 10, by + 36, 42 + 10, by + 36, 42, by + 22, ui.list_off > 0 ? C_TEXT : C_DIM);
+    button(BTN_DONE, 86, by, 148, bh, "Done", &font_mdb, BS_PRIMARY);
+    int can_down = ui.list_off + LIST_ROWS < n;
+    button(BTN_LIST_DOWN, 242, by, 72, bh, NULL, &font_md, can_down ? BS_NORMAL : BS_DISABLED);
+    gfx_tri(278 - 10, by + 24, 278 + 10, by + 24, 278, by + 38, can_down ? C_TEXT : C_DIM);
+}
 
 static void render_wifi(void)
 {
@@ -406,6 +616,18 @@ static void draw_next_icon(int cx, int cy, uint32_t c)
     gfx_tri((float)cx - 13, (float)cy - 12, (float)cx - 13, (float)cy + 12, (float)cx + 9, (float)cy, c);
 }
 
+/* Speaker (box + cone) followed by a + or - sign, centred on (cx, cy). ~34x20. */
+static void draw_volume_icon(int cx, int cy, int plus, uint32_t c)
+{
+    int x = cx - 17;
+    gfx_rrect(x, cy - 4, 6, 8, 1, c);                                    /* magnet box */
+    gfx_tri((float)x + 5, (float)cy - 4, (float)x + 15, (float)cy - 10, (float)x + 15, (float)cy + 10, c); /* cone */
+    gfx_tri((float)x + 5, (float)cy - 4, (float)x + 15, (float)cy + 10, (float)x + 5, (float)cy + 4, c);
+    int sx = x + 21;                                                      /* sign, 13x13 */
+    gfx_rrect(sx, cy - 1, 13, 3, 1, c);
+    if (plus) gfx_rrect(sx + 5, cy - 6, 3, 13, 1, c);
+}
+
 static void draw_play_icon(int cx, int cy, uint32_t c)
 {
     gfx_tri((float)cx - 9, (float)cy - 14, (float)cx - 9, (float)cy + 14, (float)cx + 15, (float)cy, c);
@@ -463,11 +685,7 @@ static void render_player(void)
         time_t t = time(NULL);
         struct tm tm;
         localtime_r(&t, &tm);
-        if (config_int("display", "clock_24h", 0)) strftime(title, sizeof title, "%H:%M", &tm);
-        else {
-            strftime(title, sizeof title, "%I:%M %p", &tm);
-            if (title[0] == '0') memmove(title, title + 1, strlen(title));
-        }
+        fmt_clock(t, title, sizeof title);
         ui.last_minute = tm.tm_min;
     }
     draw_header(title);
@@ -576,8 +794,10 @@ static void render_player(void)
 
     /* Volume: some devices (phones, some speakers) don't allow remote volume. */
     int vs = sup_vol ? BS_NORMAL : BS_DISABLED;
-    button(BTN_VOLDN, 20, 422, 84, 50, "Vol -", &font_mdb, vs);
-    button(BTN_VOLUP, 216, 422, 84, 50, "Vol +", &font_mdb, vs);
+    button(BTN_VOLDN, 20, 422, 84, 50, NULL, &font_mdb, vs);
+    draw_volume_icon(20 + 42, 422 + 25, 0, sup_vol ? C_TEXT : C_DIM);
+    button(BTN_VOLUP, 216, 422, 84, 50, NULL, &font_mdb, vs);
+    draw_volume_icon(216 + 42, 422 + 25, 1, sup_vol ? C_TEXT : C_DIM);
     if (!sup_vol) {
         /* still tappable, to explain why it's greyed out */
         add_hit(BTN_VOLDN, 20, 422, 84, 50);
@@ -606,6 +826,7 @@ static void render(void)
     switch (ui.screen) {
     case SCR_WIFI: render_wifi(); break;
     case SCR_KEYBOARD: render_keyboard(); break;
+    case SCR_TZ: render_tz(); break;
     default: render_player(); break;
     }
     gfx_flush();
@@ -655,6 +876,16 @@ static void on_press(int id)
         if (ui.kb_shift && !ui.kb_caps) ui.kb_shift = 0;
         return;
     }
+    if (ui.screen == SCR_TZ && id >= BTN_ROW0 && id < BTN_ROW0 + LIST_ROWS) {
+        int idx = ui.list_off + (id - BTN_ROW0);
+        if (idx < N_ZONES && strcmp(ui.tz, ZONES[idx].tz)) {
+            str_copy(ui.tz, sizeof ui.tz, ZONES[idx].tz);
+            clock_apply();
+            clock_save();
+            tdlog("clock: time zone set to %s (%s)", ZONES[idx].name, ui.tz);
+        }
+        return;
+    }
     if (id >= BTN_ROW0 && id < BTN_ROW0 + LIST_ROWS) {
         int idx = ui.list_off + (id - BTN_ROW0);
         if (idx >= w->n_aps) return;
@@ -682,6 +913,11 @@ static void on_press(int id)
             ui.list_off = 0;
             if (w->state != WS_CONNECTING) wifi_scan();
         }
+        break;
+    case BTN_HEADER_CLOCK: open_tz(); break;
+    case BTN_TZ_24H:
+        ui.clock_24h = !ui.clock_24h;
+        clock_save();
         break;
     case BTN_LIST_UP: ui.list_off -= LIST_ROWS; break;
     case BTN_LIST_DOWN: ui.list_off += LIST_ROWS; break;
@@ -762,11 +998,7 @@ int main(int argc, char **argv)
     char cfg[300];
     path_join(cfg, sizeof cfg, "thermodeck.ini");
     if (config_load(cfg) < 0) tdlog("config: %s not found, using defaults", cfg);
-    const char *tz = config_get("display", "timezone", "");
-    if (tz[0]) {
-        setenv("TZ", tz, 1);
-        tzset();
-    }
+    clock_load();
 
     if (gfx_init("/dev/fb0") < 0) return 1;
     gfx_set_backlight(config_int("display", "brightness", 80));
@@ -838,8 +1070,8 @@ int main(int argc, char **argv)
             ui.sp_ver = sv;
             if (ui.screen == SCR_PLAYER) ui.dirty = 1;
         }
-        if (ui.screen == SCR_PLAYER) {
-            if (ticking && spotify_progress_now() / 1000 != ui.last_progress_s) ui.dirty = 1;
+        if (ui.screen == SCR_PLAYER || ui.screen == SCR_TZ) {
+            if (ui.screen == SCR_PLAYER && ticking && spotify_progress_now() / 1000 != ui.last_progress_s) ui.dirty = 1;
             time_t t = time(NULL);
             struct tm tm;
             localtime_r(&t, &tm);
