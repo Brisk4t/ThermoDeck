@@ -1,0 +1,37 @@
+# Material Design Icons compiled into ThermoDeck (tools/gen_icons.c -> gen/icon_data.c).
+# Home Assistant icons ("mdi:<name>") not listed here fall back to the entity's default icon.
+# Add names from https://pictogrammers.com/library/mdi/ as needed; each costs ~1.5 kB.
+
+# domain / state defaults
+lightbulb lightbulb-outline lightbulb-off lightbulb-group lightbulb-on
+toggle-switch-variant toggle-switch-variant-off toggle-switch toggle-switch-off
+power power-plug power-plug-off power-socket-us power-off
+fan fan-off ceiling-fan
+window-shutter window-shutter-open blinds blinds-open curtains curtains-closed
+garage garage-open gate gate-open door door-open door-closed
+lock lock-open lock-open-variant lock-outline
+thermostat thermometer radiator air-conditioner fire snowflake water-boiler
+eye eye-off bookmark help-circle-outline information-outline alert alert-circle
+checkbox-marked-circle checkbox-blank-circle-outline radiobox-blank
+palette script-text robot robot-off robot-vacuum gesture-tap-button
+speaker speaker-off cast television television-off music play pause play-pause stop skip-next skip-previous
+account account-outline account-group account-arrow-right home home-outline home-assistant
+weather-sunny weather-night weather-partly-cloudy weather-cloudy weather-rainy weather-pouring
+weather-snowy weather-fog weather-windy weather-lightning weather-hail weather-sunset
+white-balance-sunny moon-waning-crescent
+video cctv camera
+ray-vertex format-list-bulleted timer-outline package-up bullhorn air-humidifier
+shield-home shield-off shield-lock shield-check map-marker counter remote google-circles-communities
+calendar clock-outline alarm bell bell-outline
+# sensor / binary_sensor device classes
+water-percent water water-off flash lightning-bolt battery battery-low battery-charging
+brightness-5 brightness-7 gauge molecule-co2 molecule-co smoke-detector-variant smoke-detector-variant-alert
+motion-sensor motion-sensor-off window-open window-closed run walk
+wifi wifi-off signal ethernet router-wireless server
+leak leak-off volume-high volume-off
+# rooms / devices people pick often
+sofa bed desk-lamp floor-lamp ceiling-light lamp led-strip-variant string-lights coach-lamp wall-sconce spotlight track-light
+fridge stove microwave coffee-maker kettle dishwasher washing-machine tumble-dryer
+desktop-classic laptop monitor printer gamepad-variant
+car ev-station dog cat baby-carriage flower leaf sprinkler pool pine-tree
+key cog tools trash-can package-variant

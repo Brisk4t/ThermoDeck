@@ -11,6 +11,7 @@
 
 #include "core/common.h"
 #include "gfx/gfx.h"
+#include "hass/hass.h"
 #include "spotify/spotify.h"
 #include "ui/internal.h"
 #include "wifi/wifi.h"
@@ -48,8 +49,8 @@ void add_hit(int id, int x, int y, int w, int h)
 /* Whether id was just tapped (draws the pressed highlight briefly). */
 int is_pressed(int id) { return ui.pressed_id == id && now_ms() < ui.pressed_until; }
 
-/* Repaints the current screen and pushes it to the display. */
-void ui_render(void)
+/* Draws the current screen into the back buffer (and records its hits). */
+void ui_draw(void)
 {
     ui.n_hits = 0;
     gfx_clear(C_BG);
@@ -58,18 +59,26 @@ void ui_render(void)
     case SCR_KEYBOARD: render_keyboard(); break;
     case SCR_TZ: render_tz(); break;
     case SCR_BRIGHT: render_bright(); break;
+    case SCR_HASS: render_hass(); break;
     default: render_player(); break;
     }
+    if (is_home()) draw_page_dots();
+}
+
+/* Repaints the current screen and pushes it to the display. */
+void ui_render(void)
+{
+    ui_draw();
     gfx_flush();
     ui.dirty = 0;
 }
 
 /* Acts on a tap: buttons shared by several screens here, the rest by the current screen. */
-static void on_press(int id)
+void ui_press(int id)
 {
     switch (id) {
     case BTN_HEADER_WIFI:
-        if (ui.screen == SCR_PLAYER) {
+        if (is_home()) {
             ui.screen = SCR_WIFI;
             ui.list_off = 0;
             if (wifi_get()->state != WS_CONNECTING) wifi_scan();
@@ -79,23 +88,38 @@ static void on_press(int id)
     case BTN_HEADER_BRIGHT: ui.screen = SCR_BRIGHT; return;
     case BTN_LIST_UP: ui.list_off -= LIST_ROWS; return;
     case BTN_LIST_DOWN: ui.list_off += LIST_ROWS; return;
-    case BTN_DONE: ui.screen = SCR_PLAYER; return;
+    case BTN_DONE: ui.screen = ui.home; return;
     }
     switch (ui.screen) {
     case SCR_WIFI: press_wifi(id); break;
     case SCR_KEYBOARD: press_keyboard(id); break;
     case SCR_TZ: press_tz(id); break;
     case SCR_BRIGHT: press_bright(id); break;
+    case SCR_HASS: press_hass(id); break;
     default: press_player(id); break;
     }
 }
 
+int hit_at(int x, int y)
+{
+    for (int i = ui.n_hits - 1; i >= 0; i--) {
+        const hit *h = &ui.hits[i];
+        if (x >= h->x && x < h->x + h->w && y >= h->y && y < h->y + h->h) return h->id;
+    }
+    return 0;
+}
+
 /*
- * Routes touch events: a press hits the topmost matching area; sliders follow the finger
- * until it lifts.
+ * Routes touch events. On the home screens the pager decides between taps and swipes;
+ * elsewhere a press hits the topmost matching area right away, and sliders follow the
+ * finger until it lifts.
  */
 void ui_handle_touch(const touch_event *e)
 {
+    if (is_home() || pager_busy()) {
+        pager_touch(e);
+        return;
+    }
     if (e->type == TOUCH_UP) {
         ui.last_up_ms = now_ms();
         if (ui.drag_id == BTN_BRIGHT_SLIDER) settings_save();
@@ -109,23 +133,19 @@ void ui_handle_touch(const touch_event *e)
     }
     if (e->type != TOUCH_DOWN) return;
     if (now_ms() - ui.last_up_ms < 60) return; /* bounce */
-    for (int i = ui.n_hits - 1; i >= 0; i--) {
-        const hit *h = &ui.hits[i];
-        if (e->x >= h->x && e->x < h->x + h->w && e->y >= h->y && e->y < h->y + h->h) {
-            if (h->id == BTN_BRIGHT_SLIDER) {
-                /* sliders track the finger instead of firing once */
-                ui.drag_id = h->id;
-                slide_bright(e->x);
-                ui.dirty = 1;
-                return;
-            }
-            ui.pressed_id = h->id;
-            ui.pressed_until = now_ms() + 160;
-            on_press(h->id);
-            ui.dirty = 1;
-            return;
-        }
+    int id = hit_at(e->x, e->y);
+    if (!id) return;
+    if (id == BTN_BRIGHT_SLIDER) {
+        /* sliders track the finger instead of firing once */
+        ui.drag_id = id;
+        slide_bright(e->x);
+        ui.dirty = 1;
+        return;
     }
+    ui.pressed_id = id;
+    ui.pressed_until = now_ms() + 160;
+    ui_press(id);
+    ui.dirty = 1;
 }
 
 void ui_init(int web_port)
@@ -149,6 +169,7 @@ void ui_splash(const char *line)
 
 void ui_show_wifi(void)
 {
+    ui.home = SCR_PLAYER;
     ui.screen = SCR_WIFI;
     ui.dirty = 1;
     ui.last_wifi_state = wifi_get()->state;
@@ -169,7 +190,7 @@ int ui_poll_timeout(void)
 void ui_wifi_changed(const wifi_status *w)
 {
     ui.dirty = 1;
-    if (w->state == WS_CONNECTED && ui.last_wifi_state != WS_CONNECTED && ui.screen == SCR_WIFI) ui.screen = SCR_PLAYER;
+    if (w->state == WS_CONNECTED && ui.last_wifi_state != WS_CONNECTED && ui.screen == SCR_WIFI) ui.screen = ui.home;
     ui.last_wifi_state = w->state;
 }
 
@@ -187,8 +208,16 @@ void ui_update(void)
         ui.sp_ver = sv;
         if (ui.screen == SCR_PLAYER) ui.dirty = 1;
     }
+    /* Home Assistant */
+    pthread_mutex_lock(&g_ha.mu);
+    uint32_t hv = g_ha.version;
+    pthread_mutex_unlock(&g_ha.mu);
+    if (hv != ui.ha_ver) {
+        ui.ha_ver = hv;
+        if (ui.screen == SCR_HASS) ui.dirty = 1;
+    }
     /* clock tick / progress bar: repaint once a second while playing, once a minute otherwise */
-    if (ui.screen == SCR_PLAYER || ui.screen == SCR_TZ) {
+    if (is_home() || ui.screen == SCR_TZ) {
         if (ui.screen == SCR_PLAYER && ticking && spotify_progress_now() / 1000 != ui.last_progress_s) ui.dirty = 1;
         time_t t = time(NULL);
         struct tm tm;
@@ -211,6 +240,12 @@ void ui_update(void)
             pthread_mutex_unlock(&g_sp.mu);
             ui.dirty = 1;
         }
+        pthread_mutex_lock(&g_ha.mu);
+        if (g_ha.toast_until && now > g_ha.toast_until) {
+            g_ha.toast_until = 0;
+            ui.dirty = 1;
+        }
+        pthread_mutex_unlock(&g_ha.mu);
     }
     /* blinking cursor / connecting indicator */
     const wifi_status *w = wifi_get();
@@ -218,5 +253,8 @@ void ui_update(void)
         last_blink = now;
         ui.dirty = 1;
     }
-    if (ui.dirty) ui_render();
+    if (pager_busy())
+        pager_update(); /* mid-swipe: the pager owns the screen until the finger lifts */
+    else if (ui.dirty)
+        ui_render();
 }

@@ -117,35 +117,64 @@ void gfx_set_backlight(int percent)
     write_int_file(path, 0);
 }
 
-/*
- * Copies the back buffer to the screen, converting the pixel format if the framebuffer
- * isn't 32-bit XRGB (the ecobee's is, so it's a straight memcpy per row).
- */
+/* Writes one 320-pixel row (0xRRGGBB) to framebuffer row y, converting the pixel format if
+ * the framebuffer isn't 32-bit XRGB (the ecobee's is, so it's a straight memcpy). */
+static void put_row(int y, const uint32_t *src)
+{
+    int w = fb_xres < SCR_W ? fb_xres : SCR_W;
+    uint8_t *dst = fb_mem + (size_t)y * (size_t)fb_line;
+    if (native_xrgb) {
+        memcpy(dst, src, (size_t)w * 4);
+    }
+    else if (fb_bpp == 32) {
+        uint32_t *d = (uint32_t *)dst;
+        for (int x = 0; x < w; x++) {
+            uint32_t c = src[x];
+            d[x] = (((c >> 16) & 255) << r_off) | (((c >> 8) & 255) << g_off) | ((c & 255) << b_off);
+        }
+    }
+    else if (fb_bpp == 16) {
+        uint16_t *d = (uint16_t *)dst;
+        for (int x = 0; x < w; x++) {
+            uint32_t c = src[x];
+            d[x] = (uint16_t)((((c >> 19) & 31) << 11) | (((c >> 10) & 63) << 5) | ((c >> 3) & 31));
+        }
+    }
+}
+
+static int visible_rows(void) { return fb_yres < SCR_H ? fb_yres : SCR_H; }
+
+/* Copies the back buffer to the screen. */
 void gfx_flush(void)
 {
     if (!fb_mem) return;
-    int w = fb_xres < SCR_W ? fb_xres : SCR_W;
-    int h = fb_yres < SCR_H ? fb_yres : SCR_H;
-    for (int y = 0; y < h; y++) {
-        const uint32_t *src = &backbuf[y * SCR_W];
-        uint8_t *dst = fb_mem + (size_t)y * (size_t)fb_line;
-        if (native_xrgb) {
-            memcpy(dst, src, (size_t)w * 4);
+    for (int y = 0; y < visible_rows(); y++) put_row(y, &backbuf[y * SCR_W]);
+}
+
+uint32_t *gfx_buffer(void) { return backbuf; }
+
+void gfx_present_slide(const uint32_t *a, const uint32_t *b, int top, int off, uint32_t fill)
+{
+    if (!fb_mem) return;
+    static uint32_t fill_row[SCR_W];
+    for (int x = 0; x < SCR_W; x++) fill_row[x] = fill;
+    int h = SCR_H - top;
+    for (int y = 0; y < visible_rows(); y++) {
+        const uint32_t *src;
+        if (y < top) {
+            src = &a[y * SCR_W]; /* fixed part (header) */
         }
-        else if (fb_bpp == 32) {
-            uint32_t *d = (uint32_t *)dst;
-            for (int x = 0; x < w; x++) {
-                uint32_t c = src[x];
-                d[x] = (((c >> 16) & 255) << r_off) | (((c >> 8) & 255) << g_off) | ((c & 255) << b_off);
-            }
+        else {
+            /* content row y shows page a shifted by off; b is the page above (off > 0) or below */
+            int pos = y - top - off;
+            if (pos >= 0 && pos < h)
+                src = &a[(top + pos) * SCR_W];
+            else if (!b)
+                src = fill_row;
+            else
+                src = &b[(top + (pos < 0 ? pos + h : pos - h)) * SCR_W];
         }
-        else if (fb_bpp == 16) {
-            uint16_t *d = (uint16_t *)dst;
-            for (int x = 0; x < w; x++) {
-                uint32_t c = src[x];
-                d[x] = (uint16_t)((((c >> 19) & 31) << 11) | (((c >> 10) & 63) << 5) | ((c >> 3) & 31));
-            }
-        }
+        put_row(y, src);
     }
 }
 
@@ -421,7 +450,7 @@ int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int li
         /* find the longest prefix (breaking at spaces) that fits */
         const char *q = p, *last_break = NULL;
         int w = 0;
-        while (*q) {
+        while (*q && *q != '\n') {
             const char *r = q;
             uint32_t cp = utf8_next(&r);
             int a = glyph_adv(f, cp);
@@ -431,8 +460,8 @@ int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int li
             if (*q == ' ' || !*q) last_break = q;
         }
         const char *end;
-        if (!*q)
-            end = q; /* rest fits */
+        if (!*q || *q == '\n')
+            end = q; /* rest of the line fits */
         else if (last_break)
             end = last_break; /* break at word */
         else
@@ -449,6 +478,7 @@ int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int li
         if (len >= sizeof line) len = sizeof line - 1;
         memcpy(line, p, len);
         line[len] = 0;
+        for (char *n = line; (n = strchr(n, '\n'));) *n = ' ';
         if (draw) {
             int lw = gfx_text_width(f, line);
             int lx = align == 1 ? x + (maxw - (lw < maxw ? lw : maxw)) / 2 : x;
@@ -456,6 +486,7 @@ int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int li
         }
         lines++;
         p = end;
+        if (*p == '\n') p++; /* explicit line break */
         if (is_last) break;
     }
     return lines;

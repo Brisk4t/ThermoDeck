@@ -1,8 +1,10 @@
 /* Shared drawing helpers: buttons, signal bars, icons, the top bar and toasts. */
 
 #include <math.h>
+#include <time.h>
 
 #include "core/common.h"
+#include "hass/hass.h"
 #include "spotify/spotify.h"
 #include "ui/internal.h"
 #include "wifi/wifi.h"
@@ -140,7 +142,7 @@ void draw_header(const char *title)
     int right = bx - 8;
     int left_limit = 14 + gfx_text_width(&font_mdb, title) + 16;
     int clock_right = left_limit - 8;
-    if (ui.screen == SCR_PLAYER) {
+    if (is_home()) {
         /* brightness shortcut next to the clock */
         int sx = left_limit + 10;
         draw_sun(sx, 22, 5, is_pressed(BTN_HEADER_BRIGHT) ? C_TEXT : C_SUB, C_HEADER);
@@ -156,25 +158,62 @@ void draw_header(const char *title)
             gfx_text(&font_sm, right - tw, 27, label, label_c);
     }
     add_hit(BTN_HEADER_WIFI, left_limit - 8, 0, SCR_W - left_limit + 8, 45);
-    if (ui.screen == SCR_PLAYER) add_hit(BTN_HEADER_CLOCK, 0, 0, clock_right, 45);
+    if (is_home()) add_hit(BTN_HEADER_CLOCK, 0, 0, clock_right, 45);
 }
 
-/* Shows the current toast (UI or Spotify) as a pill at height y. */
+/* Top bar of the home screens: the clock (once NTP has set it) as the title. */
+void draw_home_header(void)
+{
+    char title[16] = "ThermoDeck";
+    pthread_mutex_lock(&g_sp.mu);
+    int synced = g_sp.time_synced;
+    pthread_mutex_unlock(&g_sp.mu);
+    if (synced) {
+        time_t t = time(NULL);
+        struct tm tm;
+        localtime_r(&t, &tm);
+        fmt_clock(t, title, sizeof title);
+        ui.last_minute = tm.tm_min;
+    }
+    draw_header(title);
+}
+
+/* Shows the current toast (UI, or Spotify / Home Assistant on their screens) as a pill at height y. */
 void draw_toast(int y)
 {
     const char *msg = NULL;
     uint64_t now = now_ms();
     char buf[96];
     if (now < ui.toast_until) msg = ui.toast;
-    pthread_mutex_lock(&g_sp.mu);
-    if (!msg && now < g_sp.toast_until) {
-        str_copy(buf, sizeof buf, g_sp.toast);
-        msg = buf;
+    if (ui.screen == SCR_HASS) {
+        pthread_mutex_lock(&g_ha.mu);
+        if (!msg && now < g_ha.toast_until) {
+            str_copy(buf, sizeof buf, g_ha.toast);
+            msg = buf;
+        }
+        pthread_mutex_unlock(&g_ha.mu);
     }
-    pthread_mutex_unlock(&g_sp.mu);
+    else {
+        pthread_mutex_lock(&g_sp.mu);
+        if (!msg && now < g_sp.toast_until) {
+            str_copy(buf, sizeof buf, g_sp.toast);
+            msg = buf;
+        }
+        pthread_mutex_unlock(&g_sp.mu);
+    }
     if (!msg) return;
     int w = gfx_text_width(&font_sm, msg) + 28;
     if (w > SCR_W - 16) w = SCR_W - 16;
     gfx_rrect((SCR_W - w) / 2, y, w, 30, 15, 0x3A2020);
     gfx_text_fit(&font_sm, (SCR_W - w) / 2 + 14, y + 20, w - 28, msg, 0xFFB4AE);
+}
+
+/* Pager position: a dot per home page down the right edge, the current one highlighted. */
+void draw_page_dots(void)
+{
+    int n = pager_count(), cur = pager_current();
+    if (n < 2) return;
+    const int step = 12;
+    int y0 = HEADER_H + (SCR_H - HEADER_H) / 2 - (n - 1) * step / 2;
+    for (int i = 0; i < n; i++) gfx_circle(SCR_W - 6, y0 + i * step, i == cur ? 3 : 2, i == cur ? C_TEXT : 0x505050);
 }

@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "core/common.h"
+#include "hass/hass.h"
 #include "spotify/spotify.h"
 #include "ui/ui.h"
 
@@ -315,6 +316,19 @@ static void page_status(int fd)
     if (net) P(&s, "<tr><td>IP address</td><td>%s</td></tr>", ip);
     if (net && sig) P(&s, "<tr><td>Signal</td><td>%d dBm</td></tr>", sig);
     P(&s, "<tr><td>Clock</td><td>%s</td></tr>", clock);
+    /* Home Assistant connection */
+    static const char *const HA_STATES[] = {"not configured", "waiting for Wi-Fi", "connecting", "token rejected",
+                                            "no dashboard",   "connected",         "unreachable"};
+    pthread_mutex_lock(&g_ha.mu);
+    ha_status hs = g_ha.status;
+    int ha_items = g_ha.d.n_items, ha_ents = g_ha.d.n_ents;
+    char ha_msg[200];
+    html_escape(g_ha.msg, ha_msg, sizeof ha_msg);
+    pthread_mutex_unlock(&g_ha.mu);
+    if (hs == HA_READY)
+        P(&s, "<tr><td>Home Assistant</td><td>connected (%d cards, %d entities)</td></tr>", ha_items, ha_ents);
+    else
+        P(&s, "<tr><td>Home Assistant</td><td>%s%s%s</td></tr>", HA_STATES[hs], ha_msg[0] ? ": " : "", ha_msg);
     if (auth == SP_READY) {
         if (vol >= 0)
             P(&s, "<tr><td>Volume</td><td>%d%%</td></tr>", vol);

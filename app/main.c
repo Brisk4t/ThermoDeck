@@ -2,8 +2,8 @@
  *
  * This file only wires the modules together. Threads: UI/main (this loop: framebuffer,
  * touch, wpa_supplicant), network worker (spotify/spotify.c: NTP, OAuth, polling, commands),
- * album art (spotify/art.c) and the web server (web/web.c: login from another device,
- * status page).
+ * album art (spotify/art.c), Home Assistant (hass/hass.c: WebSocket client) and the web
+ * server (web/web.c: login from another device, status page).
  */
 #include <poll.h>
 #include <signal.h>
@@ -11,6 +11,7 @@
 #include "core/common.h"
 #include "core/config.h"
 #include "gfx/gfx.h"
+#include "hass/hass.h"
 #include "input/touch.h"
 #include "spotify/art.h"
 #include "spotify/spotify.h"
@@ -44,6 +45,7 @@ int main(int argc, char **argv)
 
     art_start();
     spotify_start();
+    hass_start();
     web_start(web_port);
 
     ui_splash("Waiting for Wi-Fi driver...");
@@ -67,12 +69,13 @@ int main(int argc, char **argv)
             if (touch_tick(&ev[0])) ui_handle_touch(&ev[0]);
         }
 
-        /* Wi-Fi: tell the Spotify worker whether the network is up, and the UI to repaint */
+        /* Wi-Fi: tell the network workers whether the network is up, and the UI to repaint */
         wifi_poll();
         const wifi_status *w = wifi_get();
         if (w->version != wifi_ver) {
             wifi_ver = w->version;
             spotify_set_net(w->state == WS_CONNECTED, w->ip, w->ssid, w->signal);
+            hass_set_net(w->state == WS_CONNECTED);
             ui_wifi_changed(w);
         }
 

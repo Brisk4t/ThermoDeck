@@ -16,6 +16,19 @@ idle_poll_interval_ms = 5000
 ; Volume change per Vol +/- press (percent).
 volume_step = 10
 
+[homeassistant]
+; Your Home Assistant address (use the IP: .local names don't resolve here) and a
+; long-lived access token (HA: your profile > Security > Long-lived access tokens).
+; https:// works too if HA has a publicly trusted certificate.
+;url = http://192.168.1.10:8123
+;token = <LONG_LIVED_ACCESS_TOKEN>
+; URL of the dashboard to show, as in its address bar (Settings > Dashboards > Add
+; dashboard named "ThermoDeck" gives dashboard-thermodeck). Build and edit it in HA;
+; changes show up on the thermostat right away. Leave empty for the default dashboard.
+;dashboard = dashboard-thermodeck
+; Fallback if that dashboard doesn't exist: tiles for these entities.
+;entities = light.living_room, switch.coffee_maker, sensor.outside_temperature
+
 [display]
 ; Backlight 1-100
 brightness = 80

@@ -7,6 +7,7 @@
 #   stb/         stb_image, stb_truetype (PD)     album art JPEGs; rasterising the UI fonts
 #   cacert.pem   Mozilla CA bundle (MPL 2.0)      -> gen/trust_anchors.c
 #   dejavu/      DejaVu Sans (Bitstream Vera)     -> gen/font_data.c
+#   mdi/         Material Design Icons (Apache 2) -> gen/icon_data.c (Home Assistant icons)
 #
 # Usage: tools/fetch_deps.sh [dest dir]   (default: third_party/)
 set -e
@@ -29,6 +30,10 @@ CACERT_URL=https://curl.se/ca/cacert-2026-11-05.pem
 DEJAVU_VER=2.37
 DEJAVU_URL=https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-$DEJAVU_VER.tar.bz2
 DEJAVU_SHA=fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
+
+MDI_VER=7.4.47
+MDI_URL=https://registry.npmjs.org/@mdi/font/-/font-$MDI_VER.tgz
+MDI_SHA=66131558352dc8df724feac30f3b7bf7ee7311a79e4f8436f3637c0993edb773
 
 fetch() { # url dest
     echo "  fetch $2" >&2
@@ -58,6 +63,15 @@ if [ ! -f dejavu/DejaVuSans.ttf ] || [ ! -f dejavu/DejaVuSans-Bold.ttf ]; then
     tar xjf dejavu.tar.bz2 $d/ttf/DejaVuSans.ttf $d/ttf/DejaVuSans-Bold.ttf $d/LICENSE
     mv $d/ttf/DejaVuSans.ttf $d/ttf/DejaVuSans-Bold.ttf $d/LICENSE dejavu/
     rm -rf $d dejavu.tar.bz2
+fi
+
+if [ ! -f mdi/materialdesignicons-webfont.ttf ] || [ ! -f mdi/_variables.scss ]; then
+    mkdir -p mdi
+    fetch "$MDI_URL" mdi.tgz
+    echo "$MDI_SHA  mdi.tgz" | sha256sum -c --quiet
+    tar xzf mdi.tgz package/fonts/materialdesignicons-webfont.ttf package/scss/_variables.scss package/LICENSE
+    mv package/fonts/materialdesignicons-webfont.ttf package/scss/_variables.scss package/LICENSE mdi/
+    rm -rf package mdi.tgz
 fi
 
 # Everything downloaded is checked against known hashes (BearSSL is pinned by commit).

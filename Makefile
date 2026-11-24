@@ -16,8 +16,9 @@
 #
 # Nothing third-party or generated is kept in git:
 #   third_party/   pinned downloads, fetched by tools/fetch_deps.sh on the first build
-#   gen/           trust_anchors.c (CA bundle via BearSSL's brssl) and font_data.c
-#                  (DejaVu via tools/gen_font.c), built with host tools in build-tools/
+#   gen/           trust_anchors.c (CA bundle via BearSSL's brssl), font_data.c (DejaVu via
+#                  tools/gen_font.c) and icon_data.c (MDI icons in tools/mdi_icons.txt via
+#                  tools/gen_icons.c), built with host tools in build-tools/
 
 TOOLCHAIN ?= $(HOME)/opt/toolchains/armv5-eabi--musl--stable-2025.08-1
 CROSS ?= $(TOOLCHAIN)/bin/arm-linux-
@@ -50,12 +51,12 @@ endif
 OBJ := $(BUILD)/obj
 
 LIB_MODULES := core json net gfx input
-APP_MODULES := wifi spotify web ui
+APP_MODULES := wifi spotify hass web ui
 MODULE_DIRS := $(addprefix lib/,$(LIB_MODULES)) $(addprefix app/,$(APP_MODULES))
 
 # generated sources belong to the module that uses them
 GEN_SRC_net := $(GEN)/trust_anchors.c
-GEN_SRC_gfx := $(GEN)/font_data.c
+GEN_SRC_gfx := $(GEN)/font_data.c $(GEN)/icon_data.c
 
 INCLUDES := $(foreach d,$(MODULE_DIRS),-I$(d)/include) -I$(BEARSSL)/inc -I$(QRCODE) -I$(STB)
 
@@ -118,11 +119,12 @@ $(OBJ)/%.o: %.c
 # ---- host test programs (make tests) ----
 # Each one links only the modules it exercises; the rest is faked in the test itself.
 
-TESTS := host_test web_host art_host ui_host
+TESTS := host_test web_host art_host ui_host hass_host
 TEST_LIBS_host_test := net json core bearssl
-TEST_LIBS_web_host := web spotify gfx net json core bearssl
+TEST_LIBS_web_host := web spotify hass gfx net json core bearssl
 TEST_LIBS_art_host := spotify gfx net json core bearssl
-TEST_LIBS_ui_host := ui gfx core qrcodegen
+TEST_LIBS_ui_host := ui hass gfx net json core qrcodegen bearssl
+TEST_LIBS_hass_host := hass net json core bearssl
 
 define test_rule
 $(BUILD)/tests/$(1): $(OBJ)/tests/$(1).o $(foreach m,$(TEST_LIBS_$(1)),$(call mod_lib,$(m)))
@@ -157,6 +159,15 @@ $(GEN)/trust_anchors.c: $(TOOLS)/brssl third_party/cacert.pem
 	  $(TOOLS)/brssl ta -q third_party/cacert.pem; \
 	  echo 'const br_x509_trust_anchor *trust_anchors = TAs;'; \
 	  echo 'const size_t trust_anchors_num = TAs_NUM;'; } > $@.tmp
+	mv $@.tmp $@
+
+$(TOOLS)/gen_icons: tools/gen_icons.c $(STB)/stb_truetype.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -I$(STB) -o $@ $< -lm
+
+$(GEN)/icon_data.c: $(TOOLS)/gen_icons tools/mdi_icons.txt third_party/mdi/materialdesignicons-webfont.ttf
+	@mkdir -p $(dir $@)
+	$(TOOLS)/gen_icons third_party/mdi tools/mdi_icons.txt > $@.tmp
 	mv $@.tmp $@
 
 $(GEN)/font_data.c: $(TOOLS)/gen_font third_party/dejavu/DejaVuSans.ttf third_party/dejavu/DejaVuSans-Bold.ttf

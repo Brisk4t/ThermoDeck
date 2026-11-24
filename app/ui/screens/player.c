@@ -101,19 +101,7 @@ static void draw_qr(int cx, int y, int max_px)
  */
 void render_player(void)
 {
-    /* header with clock */
-    char title[16] = "ThermoDeck";
-    pthread_mutex_lock(&g_sp.mu);
-    int synced = g_sp.time_synced;
-    pthread_mutex_unlock(&g_sp.mu);
-    if (synced) {
-        time_t t = time(NULL);
-        struct tm tm;
-        localtime_r(&t, &tm);
-        fmt_clock(t, title, sizeof title);
-        ui.last_minute = tm.tm_min;
-    }
-    draw_header(title);
+    draw_home_header();
 
     /* snapshot the shared state */
     pthread_mutex_lock(&g_sp.mu);

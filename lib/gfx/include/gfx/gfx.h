@@ -13,6 +13,13 @@ void gfx_flush(void);
 void gfx_close(void);
 void gfx_set_backlight(int percent);
 
+/* The back buffer itself (SCR_W * SCR_H pixels), e.g. to keep a copy of a rendered frame. */
+uint32_t *gfx_buffer(void);
+/* Shows two full frames sliding vertically, straight to the screen (the back buffer is
+ * untouched). Rows above `top` come from a; below it, a's content is shifted down by off
+ * pixels (up if negative) and b's content fills the gap (or `fill` if b is NULL). */
+void gfx_present_slide(const uint32_t *a, const uint32_t *b, int top, int off, uint32_t fill);
+
 void gfx_clear(uint32_t c);
 void gfx_fill(int x, int y, int w, int h, uint32_t c);
 void gfx_blend_px(int x, int y, uint32_t c, int a); /* a: 0..255 */
@@ -33,7 +40,7 @@ void gfx_text_center(const font_t *f, int cx, int y, const char *s, uint32_t c);
 void gfx_text_right(const font_t *f, int rx, int y, const char *s, uint32_t c);
 /* Draws s truncated with "..." to fit maxw. */
 void gfx_text_fit(const font_t *f, int x, int y, int maxw, const char *s, uint32_t c);
-/* Word-wraps into at most max_lines lines (last one ellipsized). align: 0 left, 1 center.
+/* Word-wraps (breaking at '\n' too) into at most max_lines lines (last one ellipsized). align: 0 left, 1 center.
  * Returns number of lines drawn. If draw==0 only measures. */
 int gfx_text_wrap(const font_t *f, int x, int y, int maxw, int max_lines, int line_h, const char *s, uint32_t c,
                   int align, int draw);

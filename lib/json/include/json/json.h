@@ -24,6 +24,9 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max);
 int json_get(const json_doc *d, int obj, const char *key);
 /* Value token for a dotted path like "item.album.name" starting at obj. */
 int json_path(const json_doc *d, int obj, const char *path);
+/* Token after the whole subtree of token i (to walk object members: key = obj + 1,
+ * value = key + 1, next key = json_next(value)). */
+int json_next(const json_doc *d, int i);
 /* n-th element of array, or -1. */
 int json_at(const json_doc *d, int arr, int n);
 /* Unescaped string value (UTF-8). Returns 0 if token is a string. */

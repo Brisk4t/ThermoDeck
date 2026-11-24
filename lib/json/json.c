@@ -91,7 +91,7 @@ int json_parse(json_doc *d, const char *js, size_t len, jtok *toks, int max)
 }
 
 /* Index of the token following the whole subtree of token i. */
-static int skip(const json_doc *d, int i)
+int json_next(const json_doc *d, int i)
 {
     int end = d->t[i].end;
     if (d->t[i].type == J_STR) end++; /* closing quote */
@@ -110,7 +110,7 @@ int json_get(const json_doc *d, int obj, const char *key)
         const jtok *kt = &d->t[j];
         if (kt->type == J_STR && (size_t)(kt->end - kt->start) == kl && !memcmp(d->js + kt->start, key, kl))
             return j + 1;
-        j = skip(d, j + 1);
+        j = json_next(d, j + 1);
     }
     return -1;
 }
@@ -136,7 +136,7 @@ int json_at(const json_doc *d, int arr, int n)
 {
     if (arr < 0 || arr >= d->n || d->t[arr].type != J_ARR || n >= d->t[arr].size) return -1;
     int j = arr + 1;
-    while (n-- > 0) j = skip(d, j);
+    while (n-- > 0) j = json_next(d, j);
     return j < d->n ? j : -1;
 }
 

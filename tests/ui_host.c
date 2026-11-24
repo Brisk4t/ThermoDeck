@@ -6,7 +6,11 @@
  */
 #include <pthread.h>
 
+#include <stdlib.h>
+
 #include "core/common.h"
+#include "hass/hass.h"
+#include "json/json.h"
 #include "spotify/art.h"
 #include "spotify/spotify.h"
 #include "ui/internal.h"
@@ -37,6 +41,42 @@ int art_draw(int x, int y, int r)
 }
 
 void web_get_pin(char out[7]) { strcpy(out, "123456"); }
+
+/* Loads tests/data/ha_dashboard.json + ha_states.json into g_ha (no server involved). */
+static void load_hass_fixture(void)
+{
+    size_t len;
+    char *js = file_read("tests/data/ha_dashboard.json", &len);
+    char err[160];
+    if (!js || ha_dashboard_parse(js, len, &g_ha.d, err, sizeof err) < 0) {
+        printf("dashboard fixture: %s\n", js ? err : "missing");
+        exit(1);
+    }
+    free(js);
+    js = file_read("tests/data/ha_states.json", &len);
+    static jtok t[4096];
+    json_doc d;
+    json_parse(&d, js, len, t, 4096);
+    for (int i = 0; i < g_ha.d.n_ents; i++) {
+        ha_entity *e = &g_ha.d.ents[i];
+        int st = json_get(&d, 0, e->id);
+        if (st < 0) continue;
+        int a = json_get(&d, st, "a");
+        json_str(&d, json_get(&d, st, "s"), e->state, sizeof e->state);
+        json_str(&d, json_get(&d, a, "friendly_name"), e->name, sizeof e->name);
+        json_str(&d, json_get(&d, a, "unit_of_measurement"), e->unit, sizeof e->unit);
+        json_str(&d, json_get(&d, a, "device_class"), e->device_class, sizeof e->device_class);
+        json_str(&d, json_get(&d, a, "media_title"), e->extra, sizeof e->extra);
+        e->brightness = (int)json_int(&d, json_get(&d, a, "brightness"), -1);
+        int ct = json_get(&d, a, "current_temperature");
+        if (ct >= 0)
+            snprintf(e->extra, sizeof e->extra, "%.*s\xC2\xB0", d.t[ct].end - d.t[ct].start, js + d.t[ct].start);
+        e->has_state = 1;
+    }
+    free(js);
+    g_ha.status = HA_READY;
+    g_ha.layout_ver++;
+}
 
 /* ---- scenarios ---- */
 static const char *out_dir;
@@ -127,5 +167,31 @@ int main(int argc, char **argv)
     ui.drag_id = BTN_BRIGHT_SLIDER;
     snap("bright_min_drag");
     ui.drag_id = 0;
+
+    /* Home Assistant: status pages, then the dashboard fixture page by page */
+    ui.brightness = 80;
+    g_ha.status = HA_OFF;
+    str_copy(g_ha.msg, sizeof g_ha.msg, "Add url and token under [homeassistant] in /config/thermodeck/thermodeck.ini");
+    pager_show(1);
+    snap("ha_off");
+    g_ha.status = HA_NO_DASHBOARD;
+    str_copy(g_ha.msg, sizeof g_ha.msg, "No dashboard dashboard-thermodeck in Home Assistant");
+    snap("ha_no_dashboard");
+    load_hass_fixture();
+    pager_show(0);
+    snap("pager_player");
+    for (int p = 1; p < pager_count(); p++) {
+        char name[32];
+        snprintf(name, sizeof name, "ha_page%d", p);
+        pager_show(p);
+        snap(name);
+    }
+    /* pressed tile + a toast */
+    pager_show(1);
+    ui.pressed_id = BTN_HA0 + 2;
+    ui.pressed_until = now_ms() + 100000;
+    str_copy(g_ha.toast, sizeof g_ha.toast, "Service light.explode not found.");
+    g_ha.toast_until = now_ms() + 100000;
+    snap("ha_pressed_toast");
     return 0;
 }

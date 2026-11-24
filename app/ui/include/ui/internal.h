@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include "gfx/gfx.h"
+#include "input/touch.h"
 #include "qrcodegen.h"
 #include "wifi/wifi.h"
 
@@ -34,7 +35,7 @@
 
 /* ---------- state ---------- */
 /* screens */
-enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER, SCR_TZ, SCR_BRIGHT };
+enum { SCR_WIFI, SCR_KEYBOARD, SCR_PLAYER, SCR_TZ, SCR_BRIGHT, SCR_HASS };
 
 enum {
     /* ids for everything tappable */
@@ -65,6 +66,7 @@ enum {
     KEY_SHOW,
     BTN_ROW0 = 100,  /* + row index on screen */
     KEY_CHAR = 1000, /* + character code */
+    BTN_HA0 = 2000,  /* + Home Assistant dashboard item index */
 };
 
 /* scrolling list layout shared by the Wi-Fi and time zone screens */
@@ -72,7 +74,8 @@ enum {
 #define LIST_ROW_H 56
 #define LIST_ROWS  5
 
-#define BRIGHT_MIN 5 /* lowest backlight percent (0 would look like the screen is off) */
+#define HEADER_H   45 /* top bar height; the pager slides only what's below it */
+#define BRIGHT_MIN 5  /* lowest backlight percent (0 would look like the screen is off) */
 
 /* a tappable rectangle recorded during the last repaint */
 typedef struct {
@@ -117,12 +120,20 @@ typedef struct {
     int clock_24h;
     int brightness; /* backlight percent */
     int drag_id;    /* control being dragged (slider), 0 if none */
+
+    /* home screens: the Spotify page, then the Home Assistant pages below it */
+    int home;    /* SCR_PLAYER or SCR_HASS: where Done returns to */
+    int ha_page; /* which HA page is showing */
+    uint32_t ha_ver;
 } ui_state;
 
 extern ui_state ui;
 
 /* ---------- core.c ---------- */
+void ui_draw(void); /* repaint into the back buffer only */
 void ui_render(void);
+void ui_press(int id);
+int hit_at(int x, int y); /* id of the topmost hit at (x, y), or 0 */
 void ui_toast(const char *msg);
 void add_hit(int id, int x, int y, int w, int h);
 int is_pressed(int id);
@@ -135,7 +146,9 @@ void draw_bars(int x, int y_bottom, int level, uint32_t on, uint32_t off);
 void draw_line(float x0, float y0, float x1, float y1, float w, uint32_t c);
 void draw_sun(int cx, int cy, int r, uint32_t c, uint32_t bg);
 void draw_header(const char *title);
+void draw_home_header(void);
 void draw_toast(int y);
+void draw_page_dots(void);
 
 /* ---------- settings.c ---------- */
 void settings_load(void);
@@ -162,8 +175,21 @@ void open_tz(void);
 void render_tz(void);
 void press_tz(int id);
 
+void render_hass(void);
+void press_hass(int id);
+int hass_page_count(void);
+
 void render_bright(void);
 void press_bright(int id);
 void slide_bright(int x); /* finger x on the brightness slider */
+
+/* ---------- pager.c: swiping between the home screens ---------- */
+int is_home(void);     /* showing the Spotify or an HA page */
+int pager_count(void); /* pages: Spotify + HA pages */
+int pager_current(void);
+void pager_show(int page);              /* switch without animation */
+void pager_touch(const touch_event *e); /* touch handling on the home screens */
+int pager_busy(void);                   /* a swipe is in progress: don't repaint normally */
+void pager_update(void);                /* draws the latest drag position */
 
 #endif
