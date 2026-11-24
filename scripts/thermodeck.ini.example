@@ -1,0 +1,41 @@
+; ThermoDeck configuration -- lives at /config/thermodeck/thermodeck.ini on the device.
+
+[spotify]
+; From https://developer.spotify.com/dashboard -> your app -> Settings.
+client_id = <YOUR_CLIENT_ID>
+client_secret = <YOUR_CLIENT_SECRET>
+; Must be listed under "Redirect URIs" in the app settings (exact match).
+; With the default the browser on your phone/PC lands on a page that fails to load;
+; paste that page's address into the ThermoDeck web page (http://<thermostat ip>:8080).
+; If you can reach the thermostat over https, you can point this at
+; https://<host>/callback instead and the code is picked up automatically.
+redirect_uri = http://127.0.0.1:8080/callback
+; How often to sync playback state while playing / while paused or idle.
+poll_interval_ms = 2000
+idle_poll_interval_ms = 5000
+; Volume change per Vol +/- press (percent).
+volume_step = 10
+
+[display]
+; Backlight 1-100
+brightness = 80
+; POSIX TZ string for the header clock, e.g. EST5EDT,M3.2.0,M11.1.0 or PST8PDT,M3.2.0,M11.1.0
+timezone = UTC0
+clock_24h = false
+
+[touch]
+device = /dev/input/event0
+; Fix up orientation if taps land in the wrong place.
+swap_xy = false
+invert_x = false
+invert_y = false
+; 1 = log taps, 2 = log raw events (to /tmp/thermodeck.log)
+debug = 0
+
+[web]
+port = 8080
+
+[network]
+ntp_server = pool.ntp.org
+; Used only if DHCP didn't provide DNS servers.
+fallback_dns = 1.1.1.1 8.8.8.8

@@ -1,0 +1,5 @@
+build/
+build-host/
+*.ini
+!scripts/*.ini.example
+third_party/
