@@ -32,6 +32,7 @@ int query_param(const char *qs, const char *name, char *out, size_t outlen);
 void hex_encode(const unsigned char *in, size_t len, char *out);
 int hex_decode(const char *in, unsigned char *out, size_t outlen); /* returns bytes or -1 */
 void random_bytes(unsigned char *buf, size_t len);
+void thread_background(void); /* lower this thread's CPU priority below the UI's */
 
 /* Earliest plausible wall-clock time (build time); used if NTP has not run. */
 extern const long g_build_epoch;

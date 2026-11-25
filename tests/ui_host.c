@@ -3,12 +3,15 @@
  *
  *   make tests && ./build-host/tests/ui_host <out dir>   -> <out dir>/<scenario>.ppm
  *   (view with tools/ppm2png.py)
+ *
+ * Also checks the pager's swipe decisions (see tests/touch_host.c for the touch driver).
  */
 #include <pthread.h>
 
+#include <assert.h>
 #include <stdlib.h>
-
 #include <time.h>
+#include <unistd.h>
 
 #include "cards/cards.h"
 #include "core/common.h"
@@ -16,6 +19,7 @@
 #include "json/json.h"
 #include "spotify/art.h"
 #include "spotify/spotify.h"
+#include "ui/ui.h"
 #include "ui/internal.h"
 #include "web/ota.h"
 #include "web/web.h"
@@ -116,6 +120,51 @@ static void load_hass_fixture(void)
     free(js);
     g_ha.status = HA_READY;
     g_ha.layout_ver++;
+}
+
+/* ---- pager: swipes as (ms, y) points, the finger lifting after the last one ---- */
+static void swipe(const int (*pts)[2], int n)
+{
+    uint32_t base = 1000000;
+    ui_handle_touch(&(touch_event){TOUCH_DOWN, 160, pts[0][1], base + (uint32_t)pts[0][0]});
+    for (int i = 1; i < n; i++) ui_handle_touch(&(touch_event){TOUCH_MOVE, 160, pts[i][1], base + (uint32_t)pts[i][0]});
+    ui_handle_touch(&(touch_event){TOUCH_UP, 160, pts[n - 1][1], base + (uint32_t)pts[n - 1][0] + 8});
+}
+
+static void pager_tests(void)
+{
+    ui.dimmed = 0;
+    pager_show(1);
+    /* a quick 50 px flick up: next page */
+    swipe((const int[][2]){{0, 300}, {15, 290}, {30, 275}, {45, 262}, {60, 250}}, 5);
+    assert(pager_current() == 2);
+    /* the same distance dragged slowly, then held: stays */
+    swipe((const int[][2]){{0, 300}, {300, 290}, {600, 275}, {900, 262}, {1200, 250}, {1500, 250}}, 6);
+    assert(pager_current() == 2);
+    /* a long slow drag down: previous page */
+    swipe((const int[][2]){{0, 100}, {200, 140}, {400, 180}, {600, 220}, {900, 230}}, 5);
+    assert(pager_current() == 1);
+    /* dragged far, then flung back: stays */
+    swipe((const int[][2]){{0, 300}, {100, 230}, {200, 160}, {300, 150}, {320, 170}, {340, 200}}, 6);
+    assert(pager_current() == 1);
+    /* a flick that the UI loop only gets to much later (busy rendering): still a flick */
+    uint32_t base = 2000000;
+    ui_handle_touch(&(touch_event){TOUCH_DOWN, 160, 300, base});
+    ui_handle_touch(&(touch_event){TOUCH_MOVE, 160, 280, base + 15});
+    usleep(400 * 1000);
+    ui_handle_touch(&(touch_event){TOUCH_MOVE, 160, 262, base + 30});
+    ui_handle_touch(&(touch_event){TOUCH_MOVE, 160, 250, base + 45});
+    ui_handle_touch(&(touch_event){TOUCH_UP, 160, 250, base + 53});
+    assert(pager_current() == 2);
+    pager_show(1);
+    /* a flick down from the first page: nothing above, stays */
+    pager_show(0);
+    swipe((const int[][2]){{0, 200}, {15, 215}, {30, 235}, {45, 260}}, 4);
+    assert(pager_current() == 0);
+    /* a tap still taps (no swipe) */
+    swipe((const int[][2]){{0, 300}, {40, 303}}, 2);
+    assert(pager_current() == 0 && !pager_busy());
+    puts("pager OK");
 }
 
 /* ---- scenarios ---- */
@@ -241,5 +290,9 @@ int main(int argc, char **argv)
     str_copy(g_ha.toast, sizeof g_ha.toast, "Service light.explode not found.");
     g_ha.toast_until = now_ms() + 100000;
     snap("ha_pressed_toast");
+    ui.pressed_id = 0;
+    g_ha.toast_until = 0;
+
+    pager_tests();
     return 0;
 }

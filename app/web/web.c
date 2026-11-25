@@ -716,6 +716,7 @@ static int handle(int fd, int local, const char *peer)
 static void *server(void *arg)
 {
     (void)arg;
+    thread_background();
     int s = -1;
     for (;;) {
         s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);

@@ -183,6 +183,7 @@ static uint32_t *fetch(const char *url)
 static void *worker(void *arg)
 {
     (void)arg;
+    thread_background();
     for (;;) {
         char url[URL_MAX];
         pthread_mutex_lock(&mu);

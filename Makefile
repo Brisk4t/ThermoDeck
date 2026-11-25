@@ -119,11 +119,12 @@ $(OBJ)/%.o: %.c
 # ---- host test programs (make tests) ----
 # Each one links only the modules it exercises; the rest is faked in the test itself.
 
-TESTS := host_test web_host art_host ui_host hass_host
+TESTS := host_test web_host art_host ui_host hass_host touch_host
 TEST_LIBS_host_test := backplate net json core bearssl
 TEST_LIBS_web_host := web spotify hass cards gfx net json core bearssl
 TEST_LIBS_art_host := spotify gfx net json core bearssl
 TEST_LIBS_ui_host := ui backplate cards hass gfx net json core qrcodegen bearssl
+TEST_LIBS_touch_host := input core
 TEST_LIBS_hass_host := hass cards gfx net json core bearssl
 
 define test_rule

@@ -453,6 +453,7 @@ static void wait_for(uint64_t deadline_ms)
 static void *worker(void *arg)
 {
     (void)arg;
+    thread_background();
     uint64_t next_poll = 0, next_ntp = 0;
     int ntp_ok = 0, ntp_tries = 0;
     load_refresh_token();

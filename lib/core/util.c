@@ -8,7 +8,9 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -19,6 +21,10 @@
 const long g_build_epoch = BUILD_EPOCH;
 
 char g_dir[256] = "/config/thermodeck";
+
+/* Lowers the calling thread's CPU priority (nice is per thread on Linux), so that network
+ * work and image decoding can't make the UI thread stutter. */
+void thread_background(void) { setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5); }
 
 /* Monotonic milliseconds; unaffected by NTP changing the wall clock. */
 uint64_t now_ms(void)

@@ -3,6 +3,10 @@
  * protocol A (contacts separated by SYN_MT_REPORT, frames ended by SYN_REPORT); plain
  * single-touch ABS_X/ABS_Y devices work too. Only the first contact is tracked, and raw
  * coordinates are scaled to screen pixels.
+ *
+ * The controller sometimes loses the finger for a frame or two in the middle of a fast
+ * swipe. A lift is therefore held back for BRIDGE_MS: if the finger is back by then, the
+ * gesture simply continues.
  */
 
 #include "input/touch.h"
@@ -12,6 +16,7 @@
 #include <linux/input.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "core/common.h"
@@ -37,6 +42,30 @@ static int cur_x = -1, cur_y = -1; /* position of the current (first) contact */
 static int down;
 static int seen_explicit_release;
 static uint64_t last_event_ms;
+
+#define BRIDGE_MS 50   /* a contact gap shorter than this doesn't end the touch */
+static int up_pending; /* the finger is gone, the UP isn't delivered yet */
+static int up_x, up_y; /* where it was last seen */
+static uint32_t up_ms; /* when it went (event clock) */
+static uint32_t last_frame_ms;
+
+#ifndef input_event_sec /* older headers */
+#define input_event_sec  time.tv_sec
+#define input_event_usec time.tv_usec
+#endif
+
+/* Timestamps in ms on the clock evdev stamps events with (wall time on this kernel). */
+static uint32_t to_ms(unsigned long sec, unsigned long usec)
+{
+    return (uint32_t)((uint64_t)sec * 1000u + usec / 1000u);
+}
+
+static uint32_t event_clock_now(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return to_ms((unsigned long)tv.tv_sec, (unsigned long)tv.tv_usec);
+}
 
 int touch_fd(void) { return fd; }
 
@@ -94,16 +123,19 @@ static void map(int rx, int ry, int *sx, int *sy)
     *sy = CLAMP(y, 0, SCR_H - 1);
 }
 
-/* Appends one event to the caller's buffer (if there's room). */
-static int emit(touch_event *ev, int *n, int max, int type, int x, int y)
+/* Appends one event to the caller's buffer. When it's nearly full, moves are merged into the
+ * previous move so that downs and lifts are never lost. */
+static void emit(touch_event *ev, int *n, int max, int type, int x, int y, uint32_t ms)
 {
-    if (*n >= max) return 0;
-    ev[*n].type = type;
-    ev[*n].x = x;
-    ev[*n].y = y;
+    if (opt.debug)
+        tdlog("touch: %s %d,%d @%u", type == TOUCH_DOWN ? "down" : type == TOUCH_UP ? "up" : "move", x, y, ms);
+    if (type == TOUCH_MOVE && *n > 0 && *n >= max - 2 && ev[*n - 1].type == TOUCH_MOVE) (*n)--;
+    if (*n >= max) {
+        tdlog("touch: event buffer full, %s dropped", type == TOUCH_UP ? "up" : "event");
+        return;
+    }
+    ev[*n] = (touch_event){type, x, y, ms};
     (*n)++;
-    if (opt.debug) tdlog("touch: %s %d,%d", type == TOUCH_DOWN ? "down" : type == TOUCH_UP ? "up" : "move", x, y);
-    return 1;
 }
 
 static void end_contact(void)
@@ -155,6 +187,10 @@ int touch_read(touch_event *ev, int max)
                 /* end of frame: decide whether a finger is down and emit the transition */
             }
             else if (e->type == EV_SYN && e->code == SYN_REPORT) {
+                uint32_t ms = to_ms((unsigned long)e->input_event_sec, (unsigned long)e->input_event_usec);
+                if (opt.debug && down && !up_pending && ms - last_frame_ms > 60)
+                    tdlog("touch: %u ms without a report", ms - last_frame_ms);
+                last_frame_ms = ms;
                 if (!use_mt) {
                     /* single-touch: position persists, BTN_TOUCH tells up/down */
                     if (f_x >= 0) cur_x = f_x;
@@ -171,14 +207,26 @@ int touch_read(touch_event *ev, int max)
                 if (!release && cur_x >= 0 && cur_y >= 0) {
                     int sx, sy;
                     map(cur_x, cur_y, &sx, &sy);
-                    emit(ev, &n, max, down ? TOUCH_MOVE : TOUCH_DOWN, sx, sy);
+                    if (up_pending) {
+                        /* back within the bridge time: the same touch continues */
+                        up_pending = 0;
+                        if (ms - up_ms > BRIDGE_MS) {
+                            emit(ev, &n, max, TOUCH_UP, up_x, up_y, up_ms);
+                            down = 0;
+                        }
+                        else if (opt.debug) {
+                            tdlog("touch: bridged a %u ms gap", ms - up_ms);
+                        }
+                    }
+                    emit(ev, &n, max, down ? TOUCH_MOVE : TOUCH_DOWN, sx, sy, ms);
                     down = 1;
                 }
-                else if (release && down) {
-                    int sx = 0, sy = 0;
-                    if (cur_x >= 0) map(cur_x, cur_y, &sx, &sy);
-                    emit(ev, &n, max, TOUCH_UP, sx, sy);
-                    down = 0;
+                else if (release && down && !up_pending) {
+                    /* hold the lift back (touch_tick delivers it) */
+                    up_pending = 1;
+                    up_x = up_y = 0;
+                    if (cur_x >= 0) map(cur_x, cur_y, &up_x, &up_y);
+                    up_ms = ms;
                     seen_explicit_release = 1;
                 }
                 /* reset per-frame state */
@@ -193,14 +241,28 @@ int touch_read(touch_event *ev, int max)
     return n;
 }
 
+int touch_timeout(void)
+{
+    if (!up_pending) return -1;
+    uint32_t age = event_clock_now() - up_ms;
+    return age >= BRIDGE_MS ? 0 : (int)(BRIDGE_MS - age);
+}
+
 int touch_tick(touch_event *ev)
 {
+    /* a held-back lift whose bridge time has passed (a clock step counts as passed) */
+    if (up_pending && touch_timeout() == 0) {
+        up_pending = 0;
+        down = 0;
+        *ev = (touch_event){TOUCH_UP, up_x, up_y, up_ms};
+        if (opt.debug) tdlog("touch: up %d,%d @%u", up_x, up_y, up_ms);
+        return 1;
+    }
     /* Some protocol-A drivers stop sending events while the finger rests and
      * never report the lift. Until we've seen a real release, time out. */
-    if (down && !seen_explicit_release && now_ms() - last_event_ms > 300) {
+    if (down && !up_pending && !seen_explicit_release && now_ms() - last_event_ms > 300) {
         down = 0;
-        ev->type = TOUCH_UP;
-        ev->x = ev->y = 0;
+        *ev = (touch_event){TOUCH_UP, 0, 0, last_frame_ms};
         return 1;
     }
     return 0;

@@ -683,6 +683,7 @@ static void idle(int ms)
 
 static void *worker(void *arg)
 {
+    thread_background();
     int backoff = 2;
     for (;;) {
         pthread_mutex_lock(&g_ha.mu);

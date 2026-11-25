@@ -66,10 +66,12 @@ int main(int argc, char **argv)
         int nf = 0;
         if (tfd >= 0) pfd[nf++] = (struct pollfd){tfd, POLLIN, 0};
         pfd[nf++] = (struct pollfd){ui_wake_fd(), POLLIN, 0};
-        poll(pfd, (nfds_t)nf, ui_poll_timeout());
+        int timeout = ui_poll_timeout(), lift = touch_timeout();
+        if (lift >= 0 && lift < timeout) timeout = lift; /* a held-back lift is due */
+        poll(pfd, (nfds_t)nf, timeout);
 
         /* input */
-        touch_event ev[16];
+        touch_event ev[32];
         if (tfd >= 0) {
             int n = touch_read(ev, ARRAY_LEN(ev));
             for (int i = 0; i < n; i++) ui_handle_touch(&ev[i]);
