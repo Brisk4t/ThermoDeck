@@ -1,6 +1,7 @@
-/* Host-side checks for the json and net modules: make tests && ./build-host/tests/host_test */
+/* Host-side checks for the json, net and backplate modules: make tests && ./build-host/tests/host_test */
 #include <assert.h>
 #include <stdlib.h>
+#include "backplate/backplate.h"
 #include "core/common.h"
 #include "json/json.h"
 #include "net/https.h"
@@ -46,6 +47,15 @@ int main(void)
     base64_encode((const unsigned char *)"ab:cd", 5, b64, sizeof b64);
     assert(!strcmp(b64, "YWI6Y2Q="));
     puts("json/util OK");
+
+    /* backplate framing, checked against frames captured from the real backplate */
+    const uint8_t err[] = {0x4D, 0x0B, 0x00, 0x01}, prox[] = {0x42, 0x01, 0xBB, 0x81, 0x31, 0xA0};
+    assert(backplate_crc(err, sizeof err) == 0x59C9);
+    assert(backplate_crc(prox, sizeof prox) == 0x0B85);
+    uint8_t fr[16];
+    const uint8_t off[2] = {0, 0}, want[] = {0xF2, 0x86, 0x05, 0x10, 0x00, 0x00, 0x43, 0x59};
+    assert(backplate_frame(BP_TX_GROUPED_OUTPUT, off, 2, fr, sizeof fr) == 8 && !memcmp(fr, want, 8));
+    puts("backplate OK");
 
     static https_conn c;
     http_resp r;

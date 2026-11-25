@@ -2,12 +2,14 @@
  *
  * This file only wires the modules together. Threads: UI/main (this loop: framebuffer,
  * touch, wpa_supplicant), network worker (spotify/spotify.c: NTP, OAuth, polling, commands),
- * album art (spotify/art.c), Home Assistant (hass/hass.c: WebSocket client) and the web
- * server (web/web.c: login from another device, status page).
+ * album art (spotify/art.c), Home Assistant (hass/hass.c: WebSocket client), the web
+ * server (web/web.c: login from another device, status page) and the backplate sensor
+ * reader (backplate/sensors.c: proximity).
  */
 #include <poll.h>
 #include <signal.h>
 
+#include "backplate/backplate.h"
 #include "core/common.h"
 #include "core/config.h"
 #include "gfx/gfx.h"
@@ -29,6 +31,10 @@ int main(int argc, char **argv)
     char cfg[300];
     path_join(cfg, sizeof cfg, "thermodeck.ini");
     if (config_load(cfg) < 0) tdlog("config: %s not found, using defaults", cfg);
+
+    /* ThermoDeck never runs the HVAC: every relay off before anything else, then only
+     * listen to the backplate (the proximity sensor wakes the dimmed screen) */
+    backplate_start(config_get("backplate", "device", BACKPLATE_DEV));
 
     if (gfx_init("/dev/fb0") < 0) return 1;
     int web_port = config_int("web", "port", 8080);

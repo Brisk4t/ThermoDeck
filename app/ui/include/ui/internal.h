@@ -106,6 +106,13 @@ typedef struct {
     int brightness; /* backlight percent */
     int drag_id;    /* control being dragged (slider), 0 if none */
 
+    /* screen timeout: dim after dim_after_s without a touch or anyone near the screen */
+    int dim_after_s;         /* 0 = never dim */
+    int dim_pct;             /* backlight percent while dimmed */
+    int dimmed;              /* the backlight is at dim_pct */
+    int swallow_touch;       /* the touch that woke the screen: ignore it until it lifts */
+    uint64_t last_active_ms; /* last touch or proximity, now_ms() */
+
     /* home screens: the Spotify page, then the Home Assistant pages below it */
     int home;    /* SCR_PLAYER or SCR_HASS: where Done returns to */
     int ha_page; /* which HA page is showing */
@@ -140,6 +147,8 @@ void settings_load(void);
 void settings_save(void);
 void clock_apply(void);
 void brightness_apply(int pct);
+void screen_activity(void); /* touch or someone near: undim and restart the timeout */
+void screen_timeout_tick(void);
 void fmt_clock(time_t t, char *out, size_t outlen);
 void fmt_clock_in(const char *tz, time_t t, char *out, size_t outlen);
 

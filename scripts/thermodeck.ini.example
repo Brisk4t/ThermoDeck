@@ -39,6 +39,11 @@ brightness = 80
 ; POSIX TZ string for the header clock, e.g. EST5EDT,M3.2.0,M11.1.0 or PST8PDT,M3.2.0,M11.1.0
 timezone = UTC0
 clock_24h = false
+; Screen timeout: dim to dim_brightness (percent) after dim_after seconds without a touch
+; or anyone near the screen (proximity sensor). 0 = never dim. A touch on the dimmed
+; screen only wakes it.
+dim_after = 30
+dim_brightness = 10
 
 [touch]
 device = /dev/input/event0
@@ -56,3 +61,13 @@ port = 8080
 ntp_server = pool.ntp.org
 ; Used only if DHCP didn't provide DNS servers.
 fallback_dns = 1.1.1.1 8.8.8.8
+
+[backplate]
+; UART to the backplate (HVAC relays + sensors). ThermoDeck only sends "all relays off"
+; here at startup, then only listens (proximity wakes the screen); see BACKPLATE.md.
+device = /dev/ttySP1
+; How far the raw proximity reading must rise above its resting level to count as
+; someone near. Lower = more sensitive.
+prox_delta = 400
+; 1 = log every proximity reading (to /tmp/thermodeck.log), for tuning prox_delta
+debug = 0

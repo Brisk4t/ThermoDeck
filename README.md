@@ -12,10 +12,10 @@ ThermoDeck replaces the stock interface of an ecobee thermostat (i.MX28, 320×48
 
 - **Spotify page:** now playing, cover art, play/pause, next/previous and volume. Log in from your phone; the login page is protected by a PIN shown on the thermostat.
 - **Home Assistant pages:** swipe up from Spotify. The layout comes from a dashboard you build in HA's own editor, and edits show up live. Each section of the dashboard is one screen of 12 columns × 8 rows. Cards are drawn natively; [ADDING_CARDS.md](ADDING_CARDS.md) lists how to add more.
-- **Settings:** Wi-Fi setup with an on-screen keyboard, time zone and brightness.
+- **Settings:** Wi-Fi setup with an on-screen keyboard, time zone and brightness. The screen dims after 30 s unless touched or someone is near it.
 - **Web server (port 8080):** a status page, the Spotify login, and a live preview at `/preview` of the HA pages as the thermostat draws them.
 
-Code layout: `lib/` holds reusable modules (net, gfx, json, input, core). `app/` holds the features (wifi, spotify, hass, cards, web, ui). Each module keeps its public headers in `include/<module>/`.
+Code layout: `lib/` holds reusable modules (net, gfx, json, input, core). `app/` holds the features (backplate, wifi, spotify, hass, cards, web, ui). Each module keeps its public headers in `include/<module>/`.
 
 ## Getting started
 
@@ -27,6 +27,8 @@ You need root on the thermostat and its serial console on `/dev/ttyUSB0`.
    - `[homeassistant]`: your HA address, a long-lived access token, and the dashboard's URL path (default `dashboard-thermodeck`).
 3. Start it without rebooting: `python3 tools/ser.py cmd '/config/thermodeck/boot.sh takeover'`.
 4. Join Wi-Fi on the screen, then open `http://<thermostat>:8080` to log in to Spotify.
+
+ThermoDeck never runs the HVAC: it turns every relay off at startup ([BACKPLATE.md](BACKPLATE.md)).
 
 **Going back:**
 - `touch /config/thermodeck/disable` makes the next boot run the stock UI.

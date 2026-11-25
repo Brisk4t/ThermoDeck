@@ -191,6 +191,13 @@ int hit_at(int x, int y)
  */
 void ui_handle_touch(const touch_event *e)
 {
+    /* a touch on the dimmed screen only wakes it: the whole gesture is ignored */
+    if (ui.dimmed && e->type == TOUCH_DOWN) ui.swallow_touch = 1;
+    screen_activity();
+    if (ui.swallow_touch) {
+        if (e->type == TOUCH_UP) ui.swallow_touch = 0;
+        return;
+    }
     if (is_home() || pager_busy()) {
         pager_touch(e);
         return;
@@ -227,6 +234,7 @@ void ui_init(int web_port)
 {
     settings_load();
     brightness_apply(ui.brightness);
+    ui.last_active_ms = now_ms();
     ui.web_port = web_port;
     if (pipe(wake_pipe) == 0) {
         fcntl(wake_pipe[0], F_SETFL, O_NONBLOCK);
@@ -274,6 +282,7 @@ void ui_update(void)
     char junk[64];
     while (read(wake_pipe[0], junk, sizeof junk) > 0) {}
     serve_preview();
+    screen_timeout_tick();
 
     /* Spotify */
     pthread_mutex_lock(&g_sp.mu);
