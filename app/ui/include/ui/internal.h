@@ -16,6 +16,7 @@
 #include "input/touch.h"
 #include "qrcodegen.h"
 #include "ui/theme.h"
+#include "web/ota.h"
 #include "wifi/wifi.h"
 
 /* ---------- state ---------- */
@@ -49,6 +50,7 @@ enum {
     KEY_CANCEL,
     KEY_OK,
     KEY_SHOW,
+    BTN_OTA_CANCEL,
     BTN_ROW0 = 100,  /* + row index on screen */
     KEY_CHAR = 1000, /* + character code */
     BTN_HA0 = 2000,  /* + Home Assistant dashboard item index */
@@ -117,6 +119,8 @@ typedef struct {
     int home;    /* SCR_PLAYER or SCR_HASS: where Done returns to */
     int ha_page; /* which HA page is showing */
     uint32_t ha_ver;
+
+    int ota_shown; /* phase * 1000 + seconds left of the update screen last drawn (0 = none) */
 } ui_state;
 
 extern ui_state ui;
@@ -171,6 +175,9 @@ void press_tz(int id);
 
 void render_hass(void);
 void press_hass(int id);
+
+void render_ota(const ota_view *v);
+int ota_cancel_hit(int x, int y);
 int hass_page_count(void);
 
 void render_bright(void);

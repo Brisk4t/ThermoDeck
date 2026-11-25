@@ -31,7 +31,7 @@ int gfx_init(const char *fbdev)
 {
     struct fb_var_screeninfo v;
     struct fb_fix_screeninfo f;
-    fb_fd = open(fbdev, O_RDWR);
+    fb_fd = open(fbdev, O_RDWR | O_CLOEXEC);
     if (fb_fd < 0) {
         tdlog("gfx: open %s failed", fbdev);
         return -1;
@@ -75,7 +75,7 @@ void gfx_close(void)
 /* Small sysfs helpers. */
 static int read_int_file(const char *path, int def)
 {
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "re");
     int v = def;
     if (f) {
         if (fscanf(f, "%d", &v) != 1) v = def;
@@ -86,7 +86,7 @@ static int read_int_file(const char *path, int def)
 
 static int write_int_file(const char *path, int v)
 {
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(path, "we");
     if (!f) return -1;
     fprintf(f, "%d\n", v);
     return fclose(f);
@@ -560,7 +560,7 @@ void gfx_blit(int x, int y, int w, int h, const uint32_t *px, int r)
 /* Debug: writes the back buffer as a binary PPM. */
 int gfx_dump_ppm(const char *path)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen(path, "wbe");
     if (!f) return -1;
     fprintf(f, "P6\n%d %d\n255\n", SCR_W, SCR_H);
     for (int i = 0; i < SCR_W * SCR_H; i++) {

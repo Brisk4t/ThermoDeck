@@ -104,7 +104,9 @@ int ui_screen_private(void)
     pthread_mutex_lock(&g_sp.mu);
     int login = g_sp.auth == SP_NEED_AUTH || g_sp.auth == SP_AUTHORIZING; /* PIN on the Spotify page */
     pthread_mutex_unlock(&g_sp.mu);
-    return ui.screen == SCR_KEYBOARD || login;
+    ota_view ov;
+    ota_get_view(&ov); /* the update PIN */
+    return ui.screen == SCR_KEYBOARD || login || ov.phase != OTA_IDLE;
 }
 
 /* Short message shown at the bottom of the current screen for a few seconds. */
@@ -140,9 +142,20 @@ void ui_draw(void)
     if (is_home()) draw_page_dots();
 }
 
-/* Repaints the current screen and pushes it to the display. */
+/* Repaints the current screen and pushes it to the display. A software update waiting for
+ * its PIN covers everything (drawn only here, never into off-screen previews). */
 void ui_render(void)
 {
+    ota_view ov;
+    ota_get_view(&ov);
+    if (ov.phase != OTA_IDLE) {
+        ui.n_hits = 0;
+        gfx_clear(C_BG);
+        render_ota(&ov);
+        gfx_flush();
+        ui.dirty = 0;
+        return;
+    }
     ui_draw();
     gfx_flush();
     ui.dirty = 0;
@@ -198,6 +211,20 @@ void ui_handle_touch(const touch_event *e)
         if (e->type == TOUCH_UP) ui.swallow_touch = 0;
         return;
     }
+    /* the update screen only has a Cancel button */
+    ota_view ov;
+    ota_get_view(&ov);
+    if (ov.phase != OTA_IDLE) {
+        if (pager_busy()) {
+            pager_touch(e); /* let a swipe that started before the request finish */
+            return;
+        }
+        if (e->type == TOUCH_DOWN && ov.phase == OTA_WAITING_PIN && ota_cancel_hit(e->x, e->y)) {
+            ota_cancel();
+            ui.dirty = 1;
+        }
+        return;
+    }
     if (is_home() || pager_busy()) {
         pager_touch(e);
         return;
@@ -236,10 +263,7 @@ void ui_init(int web_port)
     brightness_apply(ui.brightness);
     ui.last_active_ms = now_ms();
     ui.web_port = web_port;
-    if (pipe(wake_pipe) == 0) {
-        fcntl(wake_pipe[0], F_SETFL, O_NONBLOCK);
-        fcntl(wake_pipe[1], F_SETFL, O_NONBLOCK);
-    }
+    if (pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) tdlog("%s: no wake pipe", __func__);
 }
 
 void ui_splash(const char *line)
@@ -282,6 +306,15 @@ void ui_update(void)
     char junk[64];
     while (read(wake_pipe[0], junk, sizeof junk) > 0) {}
     serve_preview();
+    /* software update screen: wake the display, repaint as the countdown ticks */
+    ota_view ov;
+    ota_get_view(&ov);
+    int shown = ov.phase == OTA_IDLE ? 0 : (int)ov.phase * 1000 + ov.seconds_left;
+    if (shown) screen_activity();
+    if (shown != ui.ota_shown) {
+        ui.ota_shown = shown;
+        ui.dirty = 1;
+    }
     screen_timeout_tick();
 
     /* Spotify */

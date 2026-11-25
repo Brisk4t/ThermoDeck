@@ -63,7 +63,7 @@ static int handshake_fails;
 static int ctrl_open(void)
 {
     if (ctrl_fd >= 0) return 0;
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     struct sockaddr_un local = {0}, dest = {0};
     local.sun_family = AF_UNIX;
@@ -232,7 +232,7 @@ static void bump(void) { st.version++; }
 static void get_ip(char *out, size_t len)
 {
     out[0] = 0;
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (s < 0) return;
     struct ifreq ifr = {0};
     str_copy(ifr.ifr_name, IFNAMSIZ, WIFI_IFACE);
@@ -395,7 +395,7 @@ static void ensure_resolv_conf(void)
     str_copy(tmp, sizeof tmp, dns);
     for (char *t = strtok(tmp, " ,"); t; t = strtok(NULL, " ,"))
         o += (size_t)snprintf(buf + o, sizeof buf - o, "nameserver %s\n", t);
-    FILE *f = fopen("/etc/resolv.conf", "w");
+    FILE *f = fopen("/etc/resolv.conf", "we");
     if (f) {
         fwrite(buf, 1, o, f);
         fclose(f);

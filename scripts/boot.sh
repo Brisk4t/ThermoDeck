@@ -55,12 +55,22 @@ stop)
     ;;
 esac
 
+uptime_s() { cut -d. -f1 /proc/uptime; }
+
 run_loop() {
     while true; do
         if [ -f $LOG ] && [ $(wc -c < $LOG) -gt 262144 ]; then mv $LOG $LOG.1; fi
         echo "=== thermodeck start $(date) ===" >> $LOG
+        t0=$(uptime_s)
         $TD/thermodeck $TD >> $LOG 2>&1
-        echo "=== thermodeck exited with $? ===" >> $LOG
+        rc=$?
+        echo "=== thermodeck exited with $rc ===" >> $LOG
+        # An OTA update on trial (ota-pending, removed by ThermoDeck after 30 s) that dies
+        # early is rolled back to the previous build. Exit 75 = restarting into a new update.
+        if [ $rc -ne 75 ] && [ -f $TD/ota-pending ] && [ $(($(uptime_s) - t0)) -lt 30 ] && [ -f $TD/thermodeck.old ]; then
+            mv $TD/thermodeck.old $TD/thermodeck && rm -f $TD/ota-pending && sync
+            echo "=== update failed to start, rolled back to the previous build ===" >> $LOG
+        fi
         sleep 3
     done
 }

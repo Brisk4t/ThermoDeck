@@ -60,7 +60,7 @@ int tcp_connect(const char *host, int port, char *err, size_t errlen)
     int fd = -1;
     /* try each address until one connects */
     for (p = ai; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        fd = socket(p->ai_family, p->ai_socktype | SOCK_CLOEXEC, p->ai_protocol);
         if (fd < 0) continue;
         int fl = fcntl(fd, F_GETFL);
         fcntl(fd, F_SETFL, fl | O_NONBLOCK);

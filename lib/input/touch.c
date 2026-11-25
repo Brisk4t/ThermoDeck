@@ -44,7 +44,7 @@ int touch_fd(void) { return fd; }
 int touch_open(const char *dev, const touch_opts *o)
 {
     opt = *o;
-    fd = open(dev, O_RDONLY | O_NONBLOCK);
+    fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         tdlog("touch: open %s failed: %s", dev, strerror(errno));
         return -1;

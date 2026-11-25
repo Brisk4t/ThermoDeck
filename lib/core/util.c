@@ -64,7 +64,7 @@ void path_join(char *out, size_t outlen, const char *name) { snprintf(out, outle
 /* Reads a whole file into a malloc'd, NUL-terminated buffer. */
 char *file_read(const char *path, size_t *len)
 {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return NULL;
     size_t cap = 4096, n = 0;
     char *buf = malloc(cap + 1);
@@ -98,7 +98,7 @@ int file_write_atomic(const char *path, const void *data, size_t len, int mode)
 {
     char tmp[300];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
     if (fd < 0) return -1;
     const char *p = data;
     while (len) {
@@ -236,7 +236,7 @@ int hex_decode(const char *in, unsigned char *out, size_t outlen)
 /* Fills buf from /dev/urandom (weak fallback only if that fails). */
 void random_bytes(unsigned char *buf, size_t len)
 {
-    int fd = open("/dev/urandom", O_RDONLY);
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     size_t got = 0;
     if (fd >= 0) {
         while (got < len) {

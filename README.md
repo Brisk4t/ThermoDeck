@@ -27,6 +27,7 @@ You need root on the thermostat and its serial console on `/dev/ttyUSB0`.
    - `[homeassistant]`: your HA address, a long-lived access token, and the dashboard's URL path (default `dashboard-thermodeck`).
 3. Start it without rebooting: `python3 tools/ser.py cmd '/config/thermodeck/boot.sh takeover'`.
 4. Join Wi-Fi on the screen, then open `http://<thermostat>:8080` to log in to Spotify.
+5. Later builds go over Wi-Fi: `tools/ota.py <thermostat>`, then type the PIN the thermostat shows. A build that fails to start is rolled back.
 
 ThermoDeck never runs the HVAC: it turns every relay off at startup ([BACKPLATE.md](BACKPLATE.md)).
 

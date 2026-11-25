@@ -730,10 +730,7 @@ void hass_start(void)
         set_status(HA_OFF, "Add url and token under [homeassistant] in %s/thermodeck.ini", g_dir);
         return;
     }
-    if (pipe(wake_pipe) == 0) {
-        fcntl(wake_pipe[0], F_SETFL, O_NONBLOCK);
-        fcntl(wake_pipe[1], F_SETFL, O_NONBLOCK);
-    }
+    if (pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) tdlog("%s: no wake pipe", __func__);
     pthread_t th;
     pthread_create(&th, NULL, worker, NULL);
     pthread_detach(th);

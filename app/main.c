@@ -18,6 +18,7 @@
 #include "spotify/art.h"
 #include "spotify/spotify.h"
 #include "ui/ui.h"
+#include "web/ota.h"
 #include "web/web.h"
 #include "wifi/wifi.h"
 
@@ -74,6 +75,8 @@ int main(int argc, char **argv)
             for (int i = 0; i < n; i++) ui_handle_touch(&ev[i]);
             if (touch_tick(&ev[0])) ui_handle_touch(&ev[0]);
         }
+
+        ota_tick(); /* keeps a freshly installed update once it has run for a while */
 
         /* Wi-Fi: tell the network workers whether the network is up, and the UI to repaint */
         wifi_poll();

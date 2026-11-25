@@ -1,5 +1,6 @@
 #!/bin/sh
-# Upload ThermoDeck to the thermostat over the serial console.
+# Upload ThermoDeck to the thermostat over the serial console (first install, or to change
+# boot.sh / the boot hook). Binary-only updates can go over Wi-Fi with tools/ota.py.
 #   tools/deploy.sh            upload binary + launcher (+ example config if none on device)
 #   tools/deploy.sh --ini F    also upload F as /config/thermodeck/thermodeck.ini
 set -e
@@ -22,3 +23,4 @@ else
 fi
 echo "Deployed (boot hook: /config/developer/cpss-child-wrapper.sh)."
 echo "Restart now without rebooting:  python3 tools/ser.py cmd '/config/thermodeck/boot.sh takeover'"
+echo "Later updates over Wi-Fi:        tools/ota.py <thermostat address>  (PIN on the screen)"

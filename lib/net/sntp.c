@@ -25,7 +25,7 @@ int sntp_sync(const char *server)
         tdlog("ntp: cannot resolve %s", server);
         return -1;
     }
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     int rc = -1;
     if (fd >= 0) {
         unsigned char pkt[48] = {0};

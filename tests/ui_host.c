@@ -17,6 +17,7 @@
 #include "spotify/art.h"
 #include "spotify/spotify.h"
 #include "ui/internal.h"
+#include "web/ota.h"
 #include "web/web.h"
 #include "wifi/wifi.h"
 
@@ -44,6 +45,10 @@ int art_draw(int x, int y, int r)
 }
 
 void web_get_pin(char out[7]) { strcpy(out, "123456"); }
+
+static ota_view fake_ota; /* the software update screen, set per scenario */
+void ota_get_view(ota_view *v) { *v = fake_ota; }
+void ota_cancel(void) { fake_ota.phase = OTA_IDLE; }
 
 /* Loads tests/data/ha_dashboard.json + ha_states.json into g_ha (no server involved). */
 static void load_hass_fixture(void)
@@ -202,6 +207,14 @@ int main(int argc, char **argv)
     ui.drag_id = BTN_BRIGHT_SLIDER;
     snap("bright_min_drag");
     ui.drag_id = 0;
+
+    /* software update: PIN screen over whatever is showing, then installing */
+    ui.screen = SCR_PLAYER;
+    fake_ota = (ota_view){OTA_WAITING_PIN, "482913", "192.168.1.245", 107};
+    snap("ota_pin");
+    fake_ota.phase = OTA_INSTALLING;
+    snap("ota_installing");
+    fake_ota.phase = OTA_IDLE;
 
     /* Home Assistant: status pages, then the dashboard fixture page by page */
     ui.brightness = 80;

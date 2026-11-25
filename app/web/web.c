@@ -13,6 +13,9 @@
  * GET  /preview   the HA pages as drawn on the thermostat, or the live screen (embeddable,
  *                 e.g. in HA's Webpage card)
  * GET  /screen.ver, /screen.bmp [?page=N]   change check / image for /preview
+ * POST /ota/begin start an update: the thermostat shows a one-time PIN (web/ota.c)
+ * POST /ota       the new binary, authorized with that PIN (sent by tools/ota.py)
+ * GET  /version   version, build time and SHA-256 of the running binary
  */
 #include "web/web.h"
 
@@ -33,6 +36,7 @@
 #include "hass/hass.h"
 #include "spotify/spotify.h"
 #include "ui/ui.h"
+#include "web/ota.h"
 
 #define SESSION_MS       (15 * 60 * 1000)
 #define MAX_PIN_FAILURES 5
@@ -442,6 +446,12 @@ static void page_status(int fd)
         else
             P(&s, "<tr><td>Volume</td><td>unknown</td></tr>");
     }
+    char built[40];
+    time_t bt = (time_t)g_build_epoch;
+    struct tm btm;
+    gmtime_r(&bt, &btm);
+    strftime(built, sizeof built, "%Y-%m-%d %H:%M UTC", &btm);
+    P(&s, "<tr><td>Version</td><td>%s, built %s</td></tr>", TD_VERSION, built);
     P(&s, "<tr><td>Uptime</td><td>%dd %dh %dm</td></tr>", upm / 1440, (upm / 60) % 24, upm % 60);
     P(&s, "<tr><td>Load average</td><td>%s</td></tr>", load);
     P(&s, "<tr><td>ThermoDeck memory</td><td>%ld kB</td></tr>", read_kb("/proc/self/status", "VmRSS:"));
@@ -550,8 +560,10 @@ static void get_cookie(const char *req, const char *hdr_end, const char *name, c
     }
 }
 
-/* Reads one request (headers + body, 5 s timeout) and routes it. local = from 127.0.0.1. */
-static void handle(int fd, int local)
+/* Reads one request (headers + body, 5 s timeout) and routes it. local = from 127.0.0.1,
+ * peer = the client's address. Returns 1 if an update was installed and ThermoDeck should
+ * restart. */
+static int handle(int fd, int local, const char *peer)
 {
     static char req[16384];
     size_t len = 0;
@@ -564,6 +576,7 @@ static void handle(int fd, int local)
         len += (size_t)r;
         req[len] = 0;
         if (!hdr_end) hdr_end = strstr(req, "\r\n\r\n");
+        if (hdr_end && !strncmp(req, "POST /ota ", 10)) break; /* the body is streamed to flash */
         if (hdr_end) {
             char *cl = strcasestr(req, "\r\nContent-Length:");
             size_t want = cl && cl < hdr_end ? (size_t)atol(cl + 17) : 0;
@@ -571,10 +584,11 @@ static void handle(int fd, int local)
         }
     }
     req[len] = 0;
-    if (!hdr_end) return;
+    if (!hdr_end) return 0;
+    if (!strncmp(req, "POST /ota ", 10)) return ota_receive(fd, req, hdr_end, len);
     /* split "METHOD /path?query" */
     char method[8] = "", target[2048] = "";
-    if (sscanf(req, "%7s %2047s", method, target) != 2) return;
+    if (sscanf(req, "%7s %2047s", method, target) != 2) return 0;
     char *body = hdr_end + 4;
     char *qs = strchr(target, '?');
     if (qs) *qs++ = 0;
@@ -686,9 +700,16 @@ static void handle(int fd, int local)
             respond(fd, 200, "text/plain", NULL, "Logged out of Spotify.\n");
         }
     }
+    else if (!strcmp(method, "POST") && !strcmp(target, "/ota/begin")) {
+        ota_begin(fd, peer);
+    }
+    else if (!strcmp(method, "GET") && !strcmp(target, "/version")) {
+        ota_send_version(fd);
+    }
     else {
         respond(fd, 404, "text/plain", NULL, "not found\n");
     }
+    return 0;
 }
 
 /* Web thread: binds the port (retrying until it's free) and serves one connection at a time. */
@@ -697,7 +718,7 @@ static void *server(void *arg)
     (void)arg;
     int s = -1;
     for (;;) {
-        s = socket(AF_INET, SOCK_STREAM, 0);
+        s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         int one = 1;
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
         struct sockaddr_in a = {0};
@@ -713,14 +734,17 @@ static void *server(void *arg)
     for (;;) {
         struct sockaddr_in peer;
         socklen_t pl = sizeof peer;
-        int c = accept(s, (struct sockaddr *)&peer, &pl);
+        int c = accept4(s, (struct sockaddr *)&peer, &pl, SOCK_CLOEXEC);
         if (c < 0) {
             if (errno != EINTR) sleep(1);
             continue;
         }
         int local = peer.sin_family == AF_INET && ntohl(peer.sin_addr.s_addr) == INADDR_LOOPBACK;
-        handle(c, local);
+        char ip[16];
+        inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
+        int restart = handle(c, local, ip);
         close(c);
+        if (restart) exit(OTA_EXIT_RESTART); /* boot.sh starts the new binary */
     }
     return NULL;
 }

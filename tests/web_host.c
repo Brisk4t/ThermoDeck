@@ -1,10 +1,12 @@
-/* Host harness: runs the real web server + Spotify worker without the UI.
+/* Host harness: runs the real web server + Spotify worker without the UI. The login PIN and
+ * any software update PIN are printed instead of shown on a screen.
  *   make tests && ./build-host/tests/web_host <dir with thermodeck.ini> */
 #include <unistd.h>
 #include "core/common.h"
 #include "core/config.h"
 #include "spotify/spotify.h"
 #include "ui/ui.h"
+#include "web/ota.h"
 #include "web/web.h"
 void ui_wake(void) {}
 int ui_screen_private(void) { return 0; }
@@ -23,5 +25,16 @@ int main(int argc, char **argv)
     web_get_pin(pin);
     printf("PIN=%s\n", pin);
     fflush(stdout);
-    for (;;) pause();
+    /* stands in for the screen: print each software update PIN as it appears */
+    char shown[7] = "";
+    for (;;) {
+        ota_view v;
+        ota_get_view(&v);
+        if (strcmp(v.pin, shown)) {
+            memcpy(shown, v.pin, sizeof shown);
+            if (shown[0]) printf("OTA PIN=%s from %s\n", shown, v.from);
+            fflush(stdout);
+        }
+        usleep(100000);
+    }
 }
